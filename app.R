@@ -12,6 +12,7 @@ library(jsonlite)
 library(glue)
 library(rhandsontable)
 library(shinycssloaders)
+library(pdftools)
 
 # 1. Load Configuration & Helpers
 source("helpers.R")
@@ -29,7 +30,6 @@ lab_targets_raw <- read.csv("lab_targets.csv", stringsAsFactors = FALSE)
 lab_config <- split(lab_targets_raw$test_name, lab_targets_raw$category)
 
 # 2. Database Connection Logic
-# We keep this global but initialize it safely
 pool <- tryCatch({
   pool::dbPool(
     drv      = RPostgres::Postgres(),
@@ -40,43 +40,64 @@ pool <- tryCatch({
     port     = as.integer(Sys.getenv("DO_DB_PORT", unset = "25060")),
     sslmode  = "require",
     sslrootcert = "ca-certificate.crt",
-    connect_timeout = 3 # Reduce this to 3 seconds 
+    connect_timeout = 3 
   )
 }, error = function(e) {
-  message("DATABASE CONNECTION HANG PREVENTED: ", e$message) [cite: 1]
+  message("DATABASE CONNECTION HANG PREVENTED: ", e$message)
   return(NULL) 
 })
 
-# Ensure pool closes when app stops
 onStop(function() { 
   if (!is.null(pool) && inherits(pool, "Pool")) {
     poolClose(pool) 
   }
 })
 
-# --- UI Functions ---
+# --- Mobile Optimized UI ---
 secure_ui_contents <- function() {
   page_navbar(
-    title = div(
-      style = "display: flex; align-items: center; justify-content: space-between; width: 100%;",
-      span("Renal IQ Portal", style = "margin-right: 30px; font-weight: bold;"),
-      uiOutput("global_pt_header") 
+    title = "Renal IQ",
+    theme = bs_theme(
+      version = 5, 
+      primary = "#26A69A",
+      "navbar-bg" = "#ffffff"
     ),
-    nav_spacer(),
-    nav_item(uiOutput("logout_btn_ui")), 
-    theme = bs_theme(version = 5, primary = "#26A69A"),
     id = "main_nav",
-    header = list(shinyjs::useShinyjs()),
-    nav_panel("1. Registration", registration_ui("reg_mod")),
-    nav_panel("2. Clinical Notes", clinical_ui("clin_mod")),
-    nav_panel("3. Mobile Rx", mobile_rx_ui("rx_mod")),
-    nav_panel("4. Labs Flowsheet", lab_flowsheet_ui("lab_mod", lab_config)),
-    nav_panel("5. AI Lab Ingestion", lab_ingestion_ui("lab_ingest_mod")),
-    nav_panel("6. Timeline", timeline_ui("pt_timeline")),
+    header = list(
+      shinyjs::useShinyjs(),
+      tags$style(HTML("
+        .navbar-brand { font-weight: bold; color: #26A69A !important; }
+        .pt-display-header { 
+          background: #f8f9fa; 
+          padding: 10px 15px; 
+          border-bottom: 2px solid #26A69A;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          position: sticky;
+          top: 0;
+          z-index: 1000;
+        }
+        @media (max-width: 576px) {
+          .selected-pt-name { font-size: 0.9rem !important; }
+        }
+      ")),
+      uiOutput("global_pt_header")
+    ),
+    
+    nav_spacer(),
+    
+    nav_panel("Reg", registration_ui("reg_mod")),
+    nav_panel("Notes", clinical_ui("clin_mod")),
+    nav_panel("Rx", mobile_rx_ui("rx_mod")),
+    nav_panel("Labs", lab_flowsheet_ui("lab_mod", lab_config)),
+    nav_panel("AI Ingest", lab_ingestion_ui("lab_ingest_mod")),
+    nav_panel("Timeline", timeline_ui("pt_timeline")),
+    
     nav_menu(
-      title = "Admin",
-      align = "right",
-      nav_panel("User Management", uiOutput("admin_panel_ui"))
+      title = "More",
+      nav_panel("Admin", uiOutput("admin_panel_ui")),
+      nav_item(uiOutput("logout_btn_ui"))
     )
   )
 }
@@ -87,30 +108,19 @@ ui <- uiOutput("root_layout")
 server <- function(input, output, session) {
   current_pt <- reactiveVal(NULL)
   
-  # DB Availability Check
-  db_available <- reactive({ 
-    !is.null(pool) && inherits(pool, "Pool") 
-  })
-  
-  # Initialize Auth Server
+  db_available <- reactive({ !is.null(pool) && inherits(pool, "Pool") })
   auth <- auth_server("auth_mod", pool)
   
-  # Root Layout Switcher
+  # Reactive UI Switcher
   output$root_layout <- renderUI({
     if (!db_available()) {
       return(fluidPage(
         theme = bs_theme(version = 5, primary = "#26A69A"),
-        div(style="margin-top: 100px; max-width: 600px; margin-left: auto; margin-right: auto;",
+        div(style="margin-top: 50px; padding: 20px;",
             class = "alert alert-danger",
-            h4("Database Connectivity Issue"),
-            p("The application cannot reach the database cluster."),
-            tags$hr(),
-            p(style="font-size: 0.8rem;", "Troubleshooting steps:"),
-            tags$ul(
-              tags$li("Verify DO_DB_PASSWORD in App Settings."),
-              tags$li("Ensure 'App Platform' is a Trusted Source in DB Settings."),
-              tags$li("Check if 'ca-certificate.crt' is in the root folder.")
-            )
+            h4("Connection Error"),
+            p("Database cluster unreachable."),
+            tags$small("Check DO_DB credentials and Trusted Sources.")
         )
       ))
     }
@@ -118,14 +128,11 @@ server <- function(input, output, session) {
     if (auth$is_logged()) {
       secure_ui_contents()
     } else {
-      fluidPage(
-        theme = bs_theme(version = 5, primary = "#26A69A"),
-        auth_ui("auth_mod")
-      )
+      fluidPage(theme = bs_theme(version = 5, primary = "#26A69A"), auth_ui("auth_mod"))
     }
   })
   
-  # Server Modules - Only fire when logged in
+  # CRITICAL: Initialize module servers ONLY after login
   observeEvent(auth$is_logged(), {
     req(auth$is_logged())
     
@@ -138,10 +145,40 @@ server <- function(input, output, session) {
     user_management_server("user_mgmt", pool)
   })
   
-  output$logout_btn_ui <- renderUI({
-    req(auth$is_logged())
-    logout_ui("auth_mod")
+  # Debug Logger
+  observe({
+    pt <- current_pt()
+    if(!is.null(pt)) {
+      message("MAIN SERVER RECEIVED PT: ", pt$first_name)
+    }
   })
+  
+  # Sticky Header Logic
+  output$global_pt_header <- renderUI({
+    req(auth$is_logged())
+    pt <- current_pt()
+    
+    if (is.null(pt)) {
+      return(div(class = "pt-display-header", 
+                 span("No Patient Selected", class = "text-muted small italic")))
+    }
+    
+    f_name <- as.character(pt$first_name %||% "")
+    l_name <- as.character(pt$last_name %||% "")
+    full_name <- toupper(trimws(paste(f_name, l_name)))
+    
+    if(nchar(full_name) == 0) full_name <- "SELECTED PATIENT"
+    
+    div(class = "pt-display-header",
+        span(class = "selected-pt-name",
+             icon("user-circle"), 
+             tags$strong(full_name, style="margin-left: 5px; color: #26A69A;")
+        ),
+        span(paste("ID:", pt$id), class = "badge bg-dark", style="margin-left:5px;")
+    )
+  })
+  
+  output$logout_btn_ui <- renderUI({ req(auth$is_logged()); logout_ui("auth_mod") })
   
   output$admin_panel_ui <- renderUI({
     req(auth$is_logged())
@@ -149,22 +186,7 @@ server <- function(input, output, session) {
     if (!is.null(user_data) && user_data$role[1] == "admin") {
       user_management_ui("user_mgmt")
     } else {
-      div(class = "alert alert-warning", "Admin privileges required.")
-    }
-  })
-  
-  output$global_pt_header <- renderUI({
-    req(auth$is_logged())
-    pt <- current_pt()
-    if (is.null(pt)) {
-      span("No Patient Selected", class = "badge bg-secondary text-white", style="opacity: 0.8;")
-    } else {
-      p_name <- if (!is.null(pt$full_name)) pt$full_name else "Selected Patient"
-      span(
-        style = "display: flex; align-items: center; gap: 10px; margin-left: 15px;",
-        span(toupper(p_name), style = "color: #333; font-weight: bold; font-size: 1.1rem;"),
-        span(paste("ID:", pt$id), class = "badge bg-dark text-white", style="font-size: 0.7rem;")
-      )
+      div(class = "alert alert-warning", "Admin Access Required")
     }
   })
 }

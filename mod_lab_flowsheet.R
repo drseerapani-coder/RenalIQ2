@@ -216,6 +216,18 @@ lab_flowsheet_server <- function(id, pool, current_pt, lab_targets_raw,parent_na
       })
     })
     
+    output$lab_hot_table <- renderRHandsontable({
+      df <- lab_data()
+      req(df)
+      
+      rhandsontable(df, 
+                    useTypes = FALSE, # This stops the 'column add/delete' warning
+                    stretchH = "all",
+                    rowHeaders = NULL) %>%
+        hot_col("Parameter", width = 200, readOnly = TRUE, type = "text") %>%
+        hot_context_menu(allowRowEdit = FALSE, allowColEdit = FALSE) # Better for mobile
+    })
+    
     # ---------------------------------------------------------
     # HANDLER: Add New Date (Modal Insert)
     # ---------------------------------------------------------

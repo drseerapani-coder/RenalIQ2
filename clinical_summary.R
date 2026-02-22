@@ -83,34 +83,66 @@ timeline_server <- function(id, pool, current_pt) {
     ns <- session$ns
     
     output$timeline_container <- renderUI({
-      req(current_pt())
-      pid <- current_pt()$id
+      # 1. INITIAL GUARDS
+      # Ensure patient is selected and database is alive
+      req(current_pt(), pool) 
       
-      # 1. Fetch PMHx & Visits & Rx
-      pmhx_data <- dbGetQuery(pool, "SELECT condition_text FROM past_medical_history WHERE registration_id::text = $1", list(as.character(pid)))
+      pt <- current_pt()
+      pid <- pt$id
+      
+      if (is.null(pid)) {
+        return(div(class="alert alert-warning", "No valid Patient ID found."))
+      }
+      
+      # 2. DATA FETCHING WITH ERROR HANDLING
+      # Wrap in tryCatch to prevent app-wide crash on SQL errors
+      data_list <- tryCatch({
+        list(
+          pmhx = dbGetQuery(pool, "SELECT condition_text FROM past_medical_history WHERE registration_id::text = $1", list(as.character(pid))),
+          visits = dbGetQuery(pool, "SELECT visit_date, visit_json FROM visitsmodule WHERE patient_id::text = $1 ORDER BY visit_date DESC", list(as.character(pid))),
+          rx = dbGetQuery(pool, "SELECT visit_date, meds_json FROM prescriptions WHERE patient_id::text = $1", list(as.character(pid)))
+        )
+      }, error = function(e) {
+        message("Timeline Fetch Error: ", e$message)
+        return(NULL)
+      })
+      
+      if (is.null(data_list)) return(div(class="alert alert-danger", "Database fetch error. Please check logs."))
+      
+      visits <- data_list$visits
+      all_rx <- data_list$rx
+      pmhx_data <- data_list$pmhx
+      
+      # 3. EMPTY STATE CHECK
+      # This prevents 1:nrow(visits) from erroring on 0 rows
+      if (is.null(visits) || nrow(visits) == 0) {
+        return(div(class="text-center p-5", h4("No clinical records found.", class="text-muted")))
+      }
+      
       pmhx_summary <- if(nrow(pmhx_data) > 0) paste(pmhx_data$condition_text, collapse = ", ") else "None recorded"
       
-      visits <- dbGetQuery(pool, "SELECT visit_date, visit_json FROM visitsmodule WHERE patient_id::text = $1 ORDER BY visit_date DESC", list(as.character(pid)))
-      all_rx <- dbGetQuery(pool, "SELECT visit_date, meds_json FROM prescriptions WHERE patient_id::text = $1", list(as.character(pid)))
-      
-      if (nrow(visits) == 0) return(div(class="text-center p-5", h4("No clinical records found.", class="text-muted")))
-      
+      # 4. CARD RENDERING
       tagList(
         lapply(1:nrow(visits), function(i) {
           v_date <- as.Date(visits$visit_date[i])
-          # simplifyVector = FALSE prevents the $ operator error from earlier
-          v_data <- jsonlite::fromJSON(visits$visit_json[i], simplifyVector = FALSE)
           
-          # --- Process Dynamic Template Fields ---
-          template_ui <- if (!is.null(v_data$template_fields) && length(v_data$template_fields) > 0) {
+          # SAFE JSON PARSING
+          v_data <- tryCatch({
+            jsonlite::fromJSON(visits$visit_json[i], simplifyVector = FALSE)
+          }, error = function(e) list())
+          
+          # --- Process Dynamic Template Fields (With Null Checks) ---
+          # The crash often happens here if v_data$template_fields is NA instead of NULL
+          t_fields <- v_data$template_fields
+          template_ui <- if (!is.null(t_fields) && length(t_fields) > 0 && !is.na(t_fields[1])) {
             tags$div(class = "template-responses mb-2 p-2 rounded", style = "background-color: #f8f9fa; border-left: 3px solid #0d6efd;",
                      tags$small(class="text-muted fw-bold text-uppercase", "Systemic Examination:"),
                      tags$ul(class="list-unstyled mb-0", style="font-size: 0.9rem;",
-                             lapply(v_data$template_fields, function(f) {
+                             lapply(t_fields, function(f) {
+                               # Explicitly check for logical/null/empty before building LI
                                if (is.list(f) && !is.null(f$label) && nzchar(f$value %||% "")) {
                                  tags$li(tags$strong(paste0(f$label, ": ")), f$value)
                                } else if (is.character(f) && nzchar(f)) {
-                                 # Fallback for old simple-string formats
                                  tags$li(f)
                                } else { NULL }
                              })
@@ -118,11 +150,11 @@ timeline_server <- function(id, pool, current_pt) {
             )
           } else { NULL }
           
-          # --- Process Medications ---
+          # --- Process Medications (Safe Subset) ---
           day_rx <- all_rx[as.Date(all_rx$visit_date) == v_date, ]
-          rx_ui <- if(nrow(day_rx) > 0 && nzchar(day_rx$meds_json[1])) {
+          rx_ui <- if(nrow(day_rx) > 0 && !is.na(day_rx$meds_json[1]) && nzchar(day_rx$meds_json[1])) {
             rx_df <- tryCatch({ jsonlite::fromJSON(day_rx$meds_json[1]) }, error = function(e) NULL)
-            if (!is.null(rx_df) && nrow(rx_df) > 0) {
+            if (!is.null(rx_df) && is.data.frame(rx_df) && nrow(rx_df) > 0) {
               tags$ul(class="ps-3 mb-0 rx-list", 
                       lapply(1:nrow(rx_df), function(j) {
                         b_name <- rx_df[j, "brand_name"] %||% rx_df[j, "brand"] %||% "Unknown"
@@ -138,13 +170,19 @@ timeline_server <- function(id, pool, current_pt) {
               div(class = "card-header d-flex justify-content-between bg-white border-bottom align-items-center",
                   div(
                     span(strong(format(v_date, "%d %b %Y")), class = "text-primary visit-date"),
-                    tags$button(class = "btn btn-sm btn-outline-secondary ms-3", onclick = "copyVisit(this)", icon("copy"), " Copy")
+                    tags$button(class = "btn btn-sm btn-outline-secondary ms-3", 
+                                onclick = "copyVisit(this)", 
+                                icon("copy"), " Copy")
                   ),
-                  span(class = "text-danger follow-up-text", strong("Follow-up: "), v_data$followup_date %||% "N/A")
+                  span(class = "text-danger follow-up-text", 
+                       strong("Follow-up: "), 
+                       # Safe access to nested list
+                       v_data$followup_date %||% "N/A")
               ),
               div(class = "card-body",
-                  # Vitals Strip
-                  div(class = "vitals-strip p-2 mb-3 rounded-2 d-flex flex-wrap gap-3", style="background-color: #f1f3f5; font-size: 0.85rem; border-left: 4px solid #adb5bd;",
+                  # Vitals Strip with deep null checking
+                  div(class = "vitals-strip p-2 mb-3 rounded-2 d-flex flex-wrap gap-3", 
+                      style="background-color: #f1f3f5; font-size: 0.85rem; border-left: 4px solid #adb5bd;",
                       span(strong("BP: "), v_data$vitals$bp %||% "-"),
                       span(strong("Pulse: "), v_data$vitals$hr %||% "-"),
                       span(strong("Temp: "), v_data$vitals$temp %||% "-"),
@@ -155,11 +193,10 @@ timeline_server <- function(id, pool, current_pt) {
                     div(
                       div(class="mb-2", tags$small(class="text-uppercase fw-bold text-muted", "PMHx: "), tags$small(pmhx_summary, class="pmhx-snapshot")),
                       tags$h6("Examination & Plan", class="border-bottom pb-1 mt-2"),
-                      
-                      # NEW: Injected Template Data
                       template_ui, 
-                      
-                      p(v_data$clinic_notes, class="mt-2 exam-notes", style="white-space: pre-wrap; font-size: 0.95rem;")
+                      p(v_data$clinic_notes %||% "No clinical notes provided.", 
+                        class="mt-2 exam-notes", 
+                        style="white-space: pre-wrap; font-size: 0.95rem;")
                     ),
                     div(
                       tags$h6("Prescriptions", class="border-bottom pb-1 text-success"),
