@@ -29,15 +29,18 @@ source("clinical_summary.R")
 lab_targets_raw <- read.csv("lab_targets.csv", stringsAsFactors = FALSE)
 lab_config <- split(lab_targets_raw$test_name, lab_targets_raw$category)
 
-# 2. Database Connection (Non-Blocking)
+# 2. Database Connection (RE-CLEANED)
 pool <- tryCatch({
+  # Explicitly using the password we just verified
+  db_pass <- Sys.getenv("DO_DB_PASSWORD")
+  
   pool::dbPool(
     drv      = RPostgres::Postgres(),
     dbname   = "defaultdb", 
     host     = "db-postgresql-blr1-50634-do-user-27163608-0.f.db.ondigitalocean.com",
     user     = "doadmin",
     port     = 25060,
-    password = Sys.getenv("DO_DB_PASSWORD"),
+    password = db_pass,
     sslmode  = "require",
     connect_timeout = 15
   )
