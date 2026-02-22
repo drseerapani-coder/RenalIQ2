@@ -31,7 +31,6 @@ lab_config <- split(lab_targets_raw$test_name, lab_targets_raw$category)
 
 # 2. Database Connection (RE-CLEANED)
 pool <- tryCatch({
-  # Explicitly using the password we just verified
   db_pass <- Sys.getenv("DO_DB_PASSWORD")
   
   pool::dbPool(
@@ -42,14 +41,14 @@ pool <- tryCatch({
     port     = 25060,
     password = db_pass,
     sslmode  = "require",
-    connect_timeout = 15,
-    extras = list(sslrootcert = "ca-certificate.crt")
+    # Pass this directly, NOT inside 'extras'
+    sslrootcert = "ca-certificate.crt", 
+    connect_timeout = 15
   )
 }, error = function(e) {
   message("CRITICAL DB CONNECTION FAILURE: ", e$message)
   return(NULL)
 })
-
 onStop(function() { 
   if (!is.null(pool) && inherits(pool, "Pool")) {
     poolClose(pool) 
