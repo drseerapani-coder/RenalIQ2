@@ -2,7 +2,6 @@ library(shiny)
 library(bslib)
 library(pool)
 library(DBI)
-library(RPostgres)
 library(dplyr)
 library(lubridate)
 library(stringr)
@@ -13,6 +12,8 @@ library(glue)
 library(rhandsontable)
 library(shinycssloaders)
 library(pdftools)
+try(library(sodium), silent = TRUE)
+try(library(RPostgres), silent = TRUE)
 
 # 1. Load Configuration & Helpers
 source("helpers.R")
@@ -52,6 +53,12 @@ onStop(function() {
     poolClose(pool) 
   }
 })
+
+# 2. FAIL-SAFE OPENAI KEY
+openai_key <- Sys.getenv("OPENAI_API_KEY")
+if (nchar(openai_key) == 0) {
+  message("Warning: OPENAI_API_KEY is missing. AI features will be disabled.")
+}
 
 # --- Mobile Optimized UI ---
 secure_ui_contents <- function() {
