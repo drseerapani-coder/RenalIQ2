@@ -115,6 +115,13 @@ ui <- uiOutput("root_layout")
 server <- function(input, output, session) {
   current_pt <- reactiveVal(NULL)
   
+  refresh_timeline <- reactiveVal(0)
+  
+  # 2. Increment it whenever a save happens in another module
+  observeEvent(input$save_visit_button, {
+    refresh_timeline(refresh_timeline() + 1)
+  })
+  
   db_available <- reactive({ !is.null(pool) && inherits(pool, "Pool") })
   auth <- auth_server("auth_mod", pool)
   
@@ -148,7 +155,7 @@ server <- function(input, output, session) {
     lab_flowsheet_server("lab_mod", pool, current_pt, lab_targets_raw, reactive(input$main_nav), auth$user_info)
     lab_ingestion_server("lab_ingest_mod", pool, current_pt, auth$user_info)
     mobile_rx_server("rx_mod", pool, current_pt, auth$user_info)
-    timeline_server("pt_timeline", pool, current_pt)
+    timeline_server("pt_timeline", pool, current_pt, refresh_timeline)
     user_management_server("user_mgmt", pool)
   })
   

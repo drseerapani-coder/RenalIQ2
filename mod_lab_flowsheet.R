@@ -19,6 +19,7 @@ lab_flowsheet_ui <- function(id, lab_config) {
         div(class = "d-flex justify-content-between align-items-center",
             span("Clinical Lab Flowsheet"),
             div(
+              actionButton(ns("refresh_data"), "Refresh", class = "btn-outline-primary me-2", icon = icon("sync")),
               actionButton(ns("open_add_lab"), "Add New Date", class = "btn-success me-2", icon = icon("plus")),
               actionButton(ns("save_flowsheet"), "Save All Changes", class = "btn-primary", icon = icon("save"))
             ))
@@ -35,6 +36,12 @@ lab_flowsheet_server <- function(id, pool, current_pt, lab_targets_raw,parent_na
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     refresh_trigger <- reactiveVal(0)
+    
+    # Inside lab_flowsheet_server
+    observeEvent(input$refresh_data, {
+      refresh_trigger(refresh_trigger() + 1)
+      showNotification("Flowsheet updated from database.", type = "message")
+    })
     
     observeEvent(parent_nav(), {
       # Adjust the string below to match the EXACT title of your nav_panel in app.R
@@ -178,41 +185,63 @@ lab_flowsheet_server <- function(id, pool, current_pt, lab_targets_raw,parent_na
     # ---------------------------------------------------------
     # HANDLER: Save All Changes from the Flowsheet (Bulk Update)
     # ---------------------------------------------------------
+    # ---------------------------------------------------------
+    # HANDLER: Save All Changes from the Flowsheet (Bulk Update)
+    # ---------------------------------------------------------
     observeEvent(input$save_flowsheet, {
       req(current_pt(), user_info(), input$history_table)
       
       curr_user <- user_info()$username
       pt_id <- as.character(current_pt()$id)
       
-      # Convert rhandsontable back to R dataframe
+      # 1. Convert rhandsontable back to R dataframe
       df <- hot_to_r(input$history_table)
       
-      # Reshape data back to long format for DB storage
-      # Assumes first column is 'Test' and others are Dates
+      # 2. Reshape data back to long format 
+      # FIX: Changed 'Test' to 'Parameter' to match your renderRHandsontable rename
       df_long <- df %>%
-        pivot_longer(cols = -Test, names_to = "test_date", values_to = "num_val") %>%
+        pivot_longer(
+          cols = -Parameter, 
+          names_to = "test_date_str", 
+          values_to = "num_val"
+        ) %>%
         filter(!is.na(num_val))
       
-      .with_conn(pool, {
-        tryCatch({
-          # Log the start of a bulk update
-          log_audit(con, curr_user, "BULK_UPDATE_START", "labs", pt_id)
+      con <- poolCheckout(pool)
+      on.exit(poolReturn(con))
+      
+      tryCatch({
+        DBI::dbExecute(con, "BEGIN")
+        
+        log_audit(con, curr_user, "BULK_UPDATE_START", "labs", pt_id)
+        
+        for (i in seq_len(nrow(df_long))) {
+          # FIX: Convert the "dd-Mon-yy" column header back to "YYYY-MM-DD" for Postgres
+          clean_date <- as.Date(df_long$test_date_str[i], format = "%d-%b-%y")
           
-          for (i in seq_len(nrow(df_long))) {
-            DBI::dbExecute(con, "
-          UPDATE labs 
-          SET num_val = $1, updated_by = $2, updated_at = NOW() 
-          WHERE patient_id = $3 AND test_name = $4 AND test_date = $5",
-                           list(df_long$num_val[i], curr_user, pt_id, df_long$Test[i], df_long$test_date[i])
-            )
-          }
-          
-          log_audit(con, curr_user, "BULK_UPDATE_COMPLETE", "labs", pt_id)
-          showNotification("All lab changes saved and logged.", type = "message")
-          
-        }, error = function(e) {
-          showNotification(paste("Flowsheet Save Error:", e$message), type = "error")
-        })
+          DBI::dbExecute(con, "
+            UPDATE labs 
+            SET num_val = $1, updated_by = $2, updated_at = NOW() 
+            WHERE patient_id = $3 AND test_name = $4 AND test_date = $5",
+                         list(
+                           as.numeric(df_long$num_val[i]), 
+                           curr_user, 
+                           pt_id, 
+                           df_long$Parameter[i], 
+                           as.character(clean_date)
+                         )
+          )
+        }
+        
+        log_audit(con, curr_user, "BULK_UPDATE_COMPLETE", "labs", pt_id)
+        DBI::dbExecute(con, "COMMIT")
+        
+        showNotification("All lab changes saved and logged.", type = "message")
+        refresh_trigger(refresh_trigger() + 1) # Refresh to sync UI with DB
+        
+      }, error = function(e) {
+        DBI::dbExecute(con, "ROLLBACK")
+        showNotification(paste("Flowsheet Save Error:", e$message), type = "error")
       })
     })
     

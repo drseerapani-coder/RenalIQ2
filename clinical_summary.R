@@ -7,203 +7,153 @@ library(jsonlite)
 timeline_ui <- function(id) {
   ns <- NS(id)
   tagList(
-    tags$script(HTML("
-      function copyVisit(btn) {
-        var card = btn.closest('.card');
-        
-        const getPureText = (selector) => {
-          var el = card.querySelector(selector);
-          if (!el) return '';
-          // Using innerText to get clean, rendered text
-          return el.innerText.trim();
-        };
-
-        var date = getPureText('.visit-date');
-        var followUp = getPureText('.follow-up-text');
-        var vitals = getPureText('.vitals-strip').replace(/\\s+/g, ' ').trim();
-        var pmhx = getPureText('.pmhx-snapshot');
-        var notes = getPureText('.exam-notes');
-        
-        // Process medications (Already comma-separated from Server)
-        var medsArr = Array.from(card.querySelectorAll('.rx-list li'));
-        var meds = medsArr.length > 0 ? 
-                   medsArr.map(li => li.innerText.trim()).join('\\n- ') : 
-                   'No medications';
-        
-        var fullText = '--- CLINICAL VISIT: ' + date + ' ---\\n' +
-                       followUp + '\\n' +
-                       'VITALS: ' + vitals + '\\n' +
-                       'PMHx: ' + pmhx + '\\n\\n' +
-                       'EXAMINATION & PLAN:\\n' + notes + '\\n\\n' +
-                       'PRESCRIPTIONS:\\n- ' + meds;
-        
-        // Force Plain Text via Textarea Buffer
-        var textArea = document.createElement('textarea');
-        textArea.value = fullText;
-        textArea.style.position = 'fixed';
-        textArea.style.left = '-9999px';
-        document.body.appendChild(textArea);
-        textArea.focus();
-        textArea.select();
-        
-        try {
-          document.execCommand('copy');
-          var originalHtml = btn.innerHTML;
-          btn.innerHTML = '✓ Copied!';
-          btn.classList.replace('btn-outline-secondary', 'btn-success');
-          setTimeout(function() {
-            btn.innerHTML = originalHtml;
-            btn.classList.replace('btn-success', 'btn-outline-secondary');
-          }, 2000);
-        } catch (err) { console.error('Copy failed', err); }
-        
-        document.body.removeChild(textArea);
-      }
+    tags$style(HTML("
+      .visit-card { border-left: 6px solid #0d6efd; margin-bottom: 30px; border-radius: 8px; }
+      .vitals-strip { background: #f8f9fa; border-radius: 6px; padding: 12px; font-size: 0.9rem; border: 1px solid #e9ecef; }
+      .clinical-text { white-space: pre-wrap; font-size: 1rem; line-height: 1.6; color: #2c3e50; }
+      .rx-table { width: 100%; font-size: 0.85rem; margin-top: 10px; border-collapse: collapse; background: white; }
+      .rx-table th { background: #f1f3f5; color: #198754; font-weight: 600; padding: 8px; border-bottom: 2px solid #dee2e6; text-align: left; }
+      .rx-table td { padding: 8px; border-bottom: 1px solid #eee; vertical-align: top; }
+      .freq-badge { font-weight: 600; color: #0d6efd; background: #e7f1ff; padding: 2px 5px; border-radius: 4px; border: 1px solid #cfe2ff; }
     ")),
     
-    card(
-      full_screen = TRUE,
-      card_header(
-        div(class = "d-flex justify-content-between align-items-center",
-            span(icon("file-medical-alt"), " Longitudinal Patient Summary"),
-            span(class = "badge bg-info", "Chronological Order"))
-      ),
-      card_body(
-        style = "background-color: #f4f6f9;",
-        uiOutput(ns("timeline_container"))
-      )
-    )
+    tags$script(HTML("
+      /* GLOBAL FUNCTION: Added to window to ensure visibility to buttons */
+      window.copyClinicalVisit = function(btn) {
+        try {
+            var card = btn.closest('.card');
+            if (!card) return;
+            
+            // Helper to get text by selector
+            var getT = function(selector) {
+                var el = card.querySelector(selector);
+                return el ? el.innerText.trim() : 'N/A';
+            };
+            
+            var date = getT('.visit-date');
+            var vitals = getT('.vitals-text');
+            var notes = getT('.exam-notes');
+            
+            // Build Prescription Text
+            var rows = card.querySelectorAll('.rx-table tbody tr');
+            var medsText = '';
+            
+            if (rows.length > 0) {
+                medsText = Array.from(rows).map(function(tr) {
+                    var c = Array.from(tr.querySelectorAll('td')).map(function(td) {
+                        return td.innerText.trim().replace(/\\n/g, ' ');
+                    });
+                    // Format for readability in Word/Email
+                    return c[0] + ' (' + c[1] + ')\\n   Dose: ' + c[2] + ' | Freq: ' + c[3] + ' | Route: ' + c[4] + ' | Dur: ' + c[5];
+                }).join('\\n\\n');
+            } else {
+                medsText = 'No prescriptions recorded.';
+            }
+            
+            var fullText = \"--- CLINICAL ENCOUNTER: \" + date + \" ---\\n\" +
+                           \"VITALS: \" + vitals + \"\\n\\n\" +
+                           \"EXAM & PLAN:\\n\" + notes + \"\\n\\n\" +
+                           \"PRESCRIPTIONS:\\n\" + medsText;
+            
+            // Execution of Copy
+            var textArea = document.createElement('textarea');
+            textArea.value = fullText;
+            document.body.appendChild(textArea);
+            textArea.select();
+            
+            var successful = document.execCommand('copy');
+            document.body.removeChild(textArea);
+            
+            if (successful) {
+                var oldHtml = btn.innerHTML;
+                btn.innerHTML = '✓ Copied';
+                btn.classList.replace('btn-outline-secondary', 'btn-success');
+                setTimeout(function() {
+                    btn.innerHTML = oldHtml;
+                    btn.classList.replace('btn-success', 'btn-outline-secondary');
+                }, 2000);
+            }
+        } catch (err) {
+            console.error('Copy failed:', err);
+            alert('Unable to copy. Please check console.');
+        }
+      };
+    ")),
+    uiOutput(ns("timeline_render"))
   )
 }
 
 # --- SERVER FUNCTION ---
-# --- SERVER FUNCTION ---
-timeline_server <- function(id, pool, current_pt) {
+timeline_server <- function(id, pool, current_pt, refresh_trigger = reactive(0)) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     
-    output$timeline_container <- renderUI({
-      # 1. INITIAL GUARDS
-      # Ensure patient is selected and database is alive
-      req(current_pt(), pool) 
-      
-      pt <- current_pt()
-      pid <- pt$id
-      
-      if (is.null(pid)) {
-        return(div(class="alert alert-warning", "No valid Patient ID found."))
-      }
-      
-      # 2. DATA FETCHING WITH ERROR HANDLING
-      # Wrap in tryCatch to prevent app-wide crash on SQL errors
-      data_list <- tryCatch({
+    freq_lookup <- reactive({
+      tryCatch({
+        df <- read.csv("freq_list.csv", header = FALSE, stringsAsFactors = FALSE)
+        setNames(trimws(as.character(df[[2]])), trimws(as.character(df[[1]])))
+      }, error = function(e) { NULL })
+    })
+    
+    clinical_data <- reactive({
+      req(current_pt(), pool)
+      refresh_trigger()
+      pid <- as.character(current_pt()$id)
+      tryCatch({
         list(
-          pmhx = dbGetQuery(pool, "SELECT condition_text FROM past_medical_history WHERE registration_id::text = $1", list(as.character(pid))),
-          visits = dbGetQuery(pool, "SELECT visit_date, visit_json FROM visitsmodule WHERE patient_id::text = $1 ORDER BY visit_date DESC", list(as.character(pid))),
-          rx = dbGetQuery(pool, "SELECT visit_date, meds_json FROM prescriptions WHERE patient_id::text = $1", list(as.character(pid)))
+          visits = dbGetQuery(pool, paste0("SELECT visit_date::text as v_date, visit_json, clinical_notes FROM visitsmodule WHERE patient_id::text = '", pid, "' ORDER BY visit_date DESC")),
+          rx = dbGetQuery(pool, paste0("SELECT visit_date::text as v_date, meds_json FROM prescriptions WHERE patient_id::text = '", pid, "'"))
         )
-      }, error = function(e) {
-        message("Timeline Fetch Error: ", e$message)
-        return(NULL)
-      })
+      }, error = function(e) { NULL })
+    })
+    
+    output$timeline_render <- renderUI({
+      data <- clinical_data()
+      f_map <- freq_lookup()
+      if (is.null(data) || is.null(data$visits) || nrow(data$visits) == 0) return(div(class="p-4 text-center text-muted", "No encounters found."))
       
-      if (is.null(data_list)) return(div(class="alert alert-danger", "Database fetch error. Please check logs."))
-      
-      visits <- data_list$visits
-      all_rx <- data_list$rx
-      pmhx_data <- data_list$pmhx
-      
-      # 3. EMPTY STATE CHECK
-      # This prevents 1:nrow(visits) from erroring on 0 rows
-      if (is.null(visits) || nrow(visits) == 0) {
-        return(div(class="text-center p-5", h4("No clinical records found.", class="text-muted")))
-      }
-      
-      pmhx_summary <- if(nrow(pmhx_data) > 0) paste(pmhx_data$condition_text, collapse = ", ") else "None recorded"
-      
-      # 4. CARD RENDERING
       tagList(
-        lapply(1:nrow(visits), function(i) {
-          v_date <- as.Date(visits$visit_date[i])
+        lapply(1:nrow(data$visits), function(i) {
+          this_v_date <- data$visits$v_date[i]
+          v_json <- tryCatch(jsonlite::fromJSON(data$visits$visit_json[i], simplifyVector = FALSE), error = function(e) list())
+          day_rx <- data$rx[data$rx$v_date == this_v_date, ]
           
-          # SAFE JSON PARSING
-          v_data <- tryCatch({
-            jsonlite::fromJSON(visits$visit_json[i], simplifyVector = FALSE)
-          }, error = function(e) list())
-          
-          # --- Process Dynamic Template Fields (With Null Checks) ---
-          # The crash often happens here if v_data$template_fields is NA instead of NULL
-          t_fields <- v_data$template_fields
-          template_ui <- if (!is.null(t_fields) && length(t_fields) > 0 && !is.na(t_fields[1])) {
-            tags$div(class = "template-responses mb-2 p-2 rounded", style = "background-color: #f8f9fa; border-left: 3px solid #0d6efd;",
-                     tags$small(class="text-muted fw-bold text-uppercase", "Systemic Examination:"),
-                     tags$ul(class="list-unstyled mb-0", style="font-size: 0.9rem;",
-                             lapply(t_fields, function(f) {
-                               # Explicitly check for logical/null/empty before building LI
-                               if (is.list(f) && !is.null(f$label) && nzchar(f$value %||% "")) {
-                                 tags$li(tags$strong(paste0(f$label, ": ")), f$value)
-                               } else if (is.character(f) && nzchar(f)) {
-                                 tags$li(f)
-                               } else { NULL }
-                             })
-                     )
-            )
-          } else { NULL }
-          
-          # --- Process Medications (Safe Subset) ---
-          day_rx <- all_rx[as.Date(all_rx$visit_date) == v_date, ]
-          rx_ui <- if(nrow(day_rx) > 0 && !is.na(day_rx$meds_json[1]) && nzchar(day_rx$meds_json[1])) {
-            rx_df <- tryCatch({ jsonlite::fromJSON(day_rx$meds_json[1]) }, error = function(e) NULL)
-            if (!is.null(rx_df) && is.data.frame(rx_df) && nrow(rx_df) > 0) {
-              tags$ul(class="ps-3 mb-0 rx-list", 
-                      lapply(1:nrow(rx_df), function(j) {
-                        b_name <- rx_df[j, "brand_name"] %||% rx_df[j, "brand"] %||% "Unknown"
-                        med_string <- paste(na.omit(c(b_name, rx_df[j, "dose"], rx_df[j, "freq"])), collapse = ", ")
-                        tags$li(med_string)
-                      })
+          rx_ui <- if(nrow(day_rx) > 0) {
+            m_df <- tryCatch(jsonlite::fromJSON(day_rx$meds_json[1]), error = function(e) NULL)
+            if(is.data.frame(m_df) && nrow(m_df) > 0) {
+              tags$table(class="rx-table border",
+                         tags$thead(tags$tr(tags$th("Brand"), tags$th("Generic"), tags$th("Dose"), tags$th("Freq"), tags$th("Route"), tags$th("Dur"))),
+                         tags$tbody(lapply(1:nrow(m_df), function(j) {
+                           row_vals <- as.character(m_df[j, ])
+                           translated <- sapply(row_vals, function(cell) {
+                             clean <- trimws(cell); if (!is.null(f_map) && clean %in% names(f_map)) return(unname(f_map[clean])); return(cell)
+                           })
+                           tags$tr(
+                             tags$td(strong(translated[1])), tags$td(span(translated[2], style="font-size:0.75rem; color:#666")),
+                             tags$td(translated[3]), tags$td(span(class="freq-badge", translated[4])),
+                             tags$td(translated[5]), tags$td(if(length(translated)>=6) translated[6] else "-")
+                           )
+                         }))
               )
-            } else { span("No medications found.", class="text-muted italic") }
-          } else { span("No medications prescribed.", class="text-muted italic") }
+            } else { div(class="p-2 text-muted", "Format error.") }
+          } else { div(class="p-2 text-muted", "None.") }
           
-          # --- CARD UI ---
-          div(class = "card mb-4 border-0 shadow-sm",
-              div(class = "card-header d-flex justify-content-between bg-white border-bottom align-items-center",
-                  div(
-                    span(strong(format(v_date, "%d %b %Y")), class = "text-primary visit-date"),
-                    tags$button(class = "btn btn-sm btn-outline-secondary ms-3", 
-                                onclick = "copyVisit(this)", 
-                                icon("copy"), " Copy")
-                  ),
-                  span(class = "text-danger follow-up-text", 
-                       strong("Follow-up: "), 
-                       # Safe access to nested list
-                       v_data$followup_date %||% "N/A")
-              ),
-              div(class = "card-body",
-                  # Vitals Strip with deep null checking
-                  div(class = "vitals-strip p-2 mb-3 rounded-2 d-flex flex-wrap gap-3", 
-                      style="background-color: #f1f3f5; font-size: 0.85rem; border-left: 4px solid #adb5bd;",
-                      span(strong("BP: "), v_data$vitals$bp %||% "-"),
-                      span(strong("Pulse: "), v_data$vitals$hr %||% "-"),
-                      span(strong("Temp: "), v_data$vitals$temp %||% "-"),
-                      span(strong("Wt: "), v_data$vitals$weight %||% "-", "kg")
-                  ),
-                  layout_column_wrap(
-                    width = 1/2,
-                    div(
-                      div(class="mb-2", tags$small(class="text-uppercase fw-bold text-muted", "PMHx: "), tags$small(pmhx_summary, class="pmhx-snapshot")),
-                      tags$h6("Examination & Plan", class="border-bottom pb-1 mt-2"),
-                      template_ui, 
-                      p(v_data$clinic_notes %||% "No clinical notes provided.", 
-                        class="mt-2 exam-notes", 
-                        style="white-space: pre-wrap; font-size: 0.95rem;")
-                    ),
-                    div(
-                      tags$h6("Prescriptions", class="border-bottom pb-1 text-success"),
-                      div(class = "p-2 bg-light rounded", rx_ui)
-                    )
-                  )
-              )
+          card(class="visit-card shadow-sm border-0",
+               card_header(class="bg-white d-flex justify-content-between align-items-center",
+                           span(strong(format(as.Date(this_v_date), "%d %b %Y")), class="text-primary visit-date"),
+                           tags$button(class="btn btn-sm btn-outline-secondary", onclick="copyClinicalVisit(this)", "Copy Visit")
+               ),
+               card_body(
+                 div(class="vitals-strip d-flex gap-4 mb-3 vitals-text",
+                     span(strong("BP: "), v_json$vitals$bp %||% "-"), 
+                     span(strong("P: "), v_json$vitals$hr %||% "-"), 
+                     span(strong("Wt: "), v_json$vitals$weight %||% "-", "kg")),
+                 layout_column_wrap(width = 1,
+                                    div(tags$h6("Examination & Plan", class="border-bottom text-muted pb-1"), 
+                                        div(class="clinical-text exam-notes", v_json$clinic_notes %||% data$visits$clinical_notes[i] %||% "No notes.")),
+                                    div(tags$h6("Prescriptions", class="text-success border-bottom pb-1"), rx_ui)
+                 )
+               )
           )
         })
       )
