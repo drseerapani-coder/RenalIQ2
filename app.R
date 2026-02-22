@@ -33,9 +33,9 @@ lab_config <- split(lab_targets_raw$test_name, lab_targets_raw$category)
 pool <- tryCatch({
   pool::dbPool(
     drv      = RPostgres::Postgres(),
-    dbname   = Sys.getenv("DO_DB_NAME"), 
+    dbname   = Sys.getenv("DO_DB_NAME", unset = "defaultdb"), 
     host     = Sys.getenv("DO_DB_HOST"),
-    user     = Sys.getenv("DO_DB_USER"),
+    user     = Sys.getenv("DO_DB_USER", unset = "doadmin"),
     password = Sys.getenv("DO_DB_PASSWORD"),
     port     = as.integer(Sys.getenv("DO_DB_PORT", unset = "25060")),
     #sslrootcert = Sys.getenv("DO_SSLROOTCERT", unset = "ca-certificate.crt"),
@@ -47,6 +47,12 @@ pool <- tryCatch({
 })
 
 onStop(function() { if (!is.null(pool)) poolClose(pool) })
+
+# 3. Add a "Liveliness" check to ensure pool isn't NULL
+# This prevents the 'signature NULL' error downstream
+if (!inherits(pool, "Pool")) {
+  stop("Database connection object 'pool' was not created correctly.")
+}
 
 # --- UI Layout Functions ---
 # --- UI Layout Functions ---
@@ -93,9 +99,8 @@ ui <- uiOutput("root_layout")
     current_pt <- reactiveVal(NULL)
     
     is_authenticated <- reactive({
-      req(auth)
-      val <- if (is.function(auth$is_logged)) auth$is_logged() else auth$is_logged
-      isTRUE(val)
+      req(auth$is_logged)
+      auth$is_logged() # This will now trigger UI updates instantly on login
     })
     
     # Switch between full layouts
@@ -177,13 +182,13 @@ ui <- uiOutput("root_layout")
   # Render the admin UI only if the user is an admin
   output$admin_panel_ui <- renderUI({
     req(is_authenticated())
-    user_info <- auth$user_info()
+    # Call the reactive to get the actual data frame
+    user_data <- auth$user_info() 
     
-    # Only allow users with 'admin' role to see the management tools
-    if (!is.null(user_info) && user_info$role[1] == "admin") {
+    if (!is.null(user_data) && user_data$role[1] == "admin") {
       user_management_ui("user_mgmt")
     } else {
-      div(class = "alert alert-danger", "Access Denied: Admin privileges required.")
+      div(class = "alert alert-warning", "Admin privileges required.")
     }
   })
   
