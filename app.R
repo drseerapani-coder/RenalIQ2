@@ -31,29 +31,20 @@ lab_config <- split(lab_targets_raw$test_name, lab_targets_raw$category)
 # 2. Database Connection Logic
 # We keep this global but initialize it safely
 pool <- tryCatch({
-  # These MUST match the 'key' column in your DigitalOcean AppSpec
-  db_host <- Sys.getenv("DO_DB_HOST")
-  db_port <- as.integer(Sys.getenv("DO_DB_PORT", unset = "25060"))
-  db_name <- Sys.getenv("DO_DB_NAME")
-  db_user <- Sys.getenv("DO_DB_USER")
-  db_pass <- Sys.getenv("DO_DB_PASSWORD")
-  
-  message("Attempting connection to: ", db_host)
-  
   pool::dbPool(
     drv      = RPostgres::Postgres(),
-    host     = db_host,
-    port     = db_port,
-    dbname   = db_name,
-    user     = db_user,
-    password = db_pass,
+    dbname   = Sys.getenv("DO_DB_NAME"), 
+    host     = Sys.getenv("DO_DB_HOST"),
+    user     = Sys.getenv("DO_DB_USER"),
+    password = Sys.getenv("DO_DB_PASSWORD"),
+    port     = as.integer(Sys.getenv("DO_DB_PORT", unset = "25060")),
     sslmode  = "require",
     sslrootcert = "ca-certificate.crt",
-    connect_timeout = 5
+    connect_timeout = 3 # Reduce this to 3 seconds 
   )
 }, error = function(e) {
-  message("DB CONNECTION ERROR: ", e$message)
-  NULL 
+  message("DATABASE CONNECTION HANG PREVENTED: ", e$message) [cite: 1]
+  return(NULL) 
 })
 
 # Ensure pool closes when app stops
