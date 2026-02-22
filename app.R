@@ -42,7 +42,8 @@ pool <- tryCatch({
     port     = 25060,
     password = db_pass,
     sslmode  = "require",
-    connect_timeout = 15
+    connect_timeout = 15,
+    extras = list(sslrootcert = "ca-certificate.crt")
   )
 }, error = function(e) {
   message("CRITICAL DB CONNECTION FAILURE: ", e$message)
