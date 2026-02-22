@@ -20,22 +20,16 @@ RUN R -e "install.packages(c(\
     ), repos='https://cran.rstudio.com/')"
 
 # 3. App Setup
-# IMPORTANT: Delete default "Hello World" apps so they don't block your app
 RUN rm -rf /srv/shiny-server/*
-
-# Set the working directory so R finds your files automatically
 WORKDIR /srv/shiny-server/
-
-# Copy your local code into the image
 COPY . /srv/shiny-server/
 
 # Fix permissions
 RUN chown -R shiny:shiny /srv/shiny-server/
 
 # 4. Port & Startup
-# DigitalOcean works best on 8080, but if you keep 3838, 
-# you MUST match it in the DO Dashboard settings.
-EXPOSE 3838
+# DigitalOcean expects 8080 by default. 
+EXPOSE 8080
 
-# Standard startup
-CMD ["/usr/bin/shiny-server"]
+# Direct startup bypasses shiny-server management for better health check reliability
+CMD ["R", "-e", "shiny::runApp('/srv/shiny-server', host='0.0.0.0', port=8080)"]
