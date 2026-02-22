@@ -1,4 +1,3 @@
-# app.R
 library(shiny)
 library(bslib)
 library(pool)
@@ -25,40 +24,46 @@ source("mod_lab_ingestion.R")
 source("mod_user_mgmt.R")
 source("clinical_summary.R")
 
-# Load static data
+# Load static data - Wrapped in try to prevent crash if file read fails
 lab_targets_raw <- read.csv("lab_targets.csv", stringsAsFactors = FALSE)
 lab_config <- split(lab_targets_raw$test_name, lab_targets_raw$category)
 
-# 2. Database Connection (RE-CLEANED)
-
+# 2. Database Connection Logic
+# We keep this global but initialize it safely
 pool <- tryCatch({
+  # These MUST match the 'key' column in your DigitalOcean AppSpec
+  db_host <- Sys.getenv("DO_DB_HOST")
+  db_port <- as.integer(Sys.getenv("DO_DB_PORT", unset = "25060"))
+  db_name <- Sys.getenv("DO_DB_NAME")
+  db_user <- Sys.getenv("DO_DB_USER")
   db_pass <- Sys.getenv("DO_DB_PASSWORD")
+  
+  message("Attempting connection to: ", db_host)
   
   pool::dbPool(
     drv      = RPostgres::Postgres(),
-    dbname   = "defaultdb", 
-    host     = "db-postgresql-blr1-50634-do-user-27163608-0.f.db.ondigitalocean.com",
-    user     = "doadmin",
-    port     = 25060,
+    host     = db_host,
+    port     = db_port,
+    dbname   = db_name,
+    user     = db_user,
     password = db_pass,
     sslmode  = "require",
     sslrootcert = "ca-certificate.crt",
-    # If it can't connect in 3 seconds, fail and let the app start anyway
-    connect_timeout = 3 
+    connect_timeout = 5
   )
 }, error = function(e) {
-  message("CRITICAL DB FAILURE: ", e$message)
-  return(NULL) 
+  message("DB CONNECTION ERROR: ", e$message)
+  NULL 
 })
 
-
+# Ensure pool closes when app stops
 onStop(function() { 
   if (!is.null(pool) && inherits(pool, "Pool")) {
     poolClose(pool) 
   }
 })
 
-# --- UI Layout Functions ---
+# --- UI Functions ---
 secure_ui_contents <- function() {
   page_navbar(
     title = div(
@@ -68,12 +73,9 @@ secure_ui_contents <- function() {
     ),
     nav_spacer(),
     nav_item(uiOutput("logout_btn_ui")), 
-    
     theme = bs_theme(version = 5, primary = "#26A69A"),
     id = "main_nav",
-    
     header = list(shinyjs::useShinyjs()),
-    
     nav_panel("1. Registration", registration_ui("reg_mod")),
     nav_panel("2. Clinical Notes", clinical_ui("clin_mod")),
     nav_panel("3. Mobile Rx", mobile_rx_ui("rx_mod")),
@@ -92,39 +94,39 @@ ui <- uiOutput("root_layout")
 
 # 3. Server Logic
 server <- function(input, output, session) {
-  
-  # A. Setup stable reactives
   current_pt <- reactiveVal(NULL)
   
-  # B. Check Database Availability
+  # DB Availability Check
   db_available <- reactive({ 
     !is.null(pool) && inherits(pool, "Pool") 
   })
   
-  # C. Initialize Auth Server ONCE at the top level
-  # This prevents the re-initialization loop causing the "Welcome" flicker
+  # Initialize Auth Server
   auth <- auth_server("auth_mod", pool)
   
-  # D. Main UI Switcher
+  # Root Layout Switcher
   output$root_layout <- renderUI({
-    # Condition 1: DB Fail
     if (!db_available()) {
       return(fluidPage(
         theme = bs_theme(version = 5, primary = "#26A69A"),
         div(style="margin-top: 100px; max-width: 600px; margin-left: auto; margin-right: auto;",
             class = "alert alert-danger",
-            h4("Database Offline"),
-            p("The application is running but cannot reach the database cluster."),
-            tags$small("Check DigitalOcean Trusted Sources/Firewall.")
+            h4("Database Connectivity Issue"),
+            p("The application cannot reach the database cluster."),
+            tags$hr(),
+            p(style="font-size: 0.8rem;", "Troubleshooting steps:"),
+            tags$ul(
+              tags$li("Verify DO_DB_PASSWORD in App Settings."),
+              tags$li("Ensure 'App Platform' is a Trusted Source in DB Settings."),
+              tags$li("Check if 'ca-certificate.crt' is in the root folder.")
+            )
         )
       ))
     }
     
-    # Condition 2: Authenticated
     if (auth$is_logged()) {
       secure_ui_contents()
     } else {
-      # Condition 3: Login Screen
       fluidPage(
         theme = bs_theme(version = 5, primary = "#26A69A"),
         auth_ui("auth_mod")
@@ -132,8 +134,7 @@ server <- function(input, output, session) {
     }
   })
   
-  # E. Trigger Module Servers ONLY on Login Success
-  # Using observeEvent prevents the modules from re-firing constantly
+  # Server Modules - Only fire when logged in
   observeEvent(auth$is_logged(), {
     req(auth$is_logged())
     
@@ -144,11 +145,8 @@ server <- function(input, output, session) {
     mobile_rx_server("rx_mod", pool, current_pt, auth$user_info)
     timeline_server("pt_timeline", pool, current_pt)
     user_management_server("user_mgmt", pool)
-    
-    message("Session started for user: ", auth$user_info()$username)
   })
   
-  # F. Global UI Renderers
   output$logout_btn_ui <- renderUI({
     req(auth$is_logged())
     logout_ui("auth_mod")
@@ -178,17 +176,6 @@ server <- function(input, output, session) {
       )
     }
   })
-  
-  # G. Cleanup on Logout
-  observe({
-    if (!auth$is_logged()) {
-      current_pt(NULL)
-    }
-  })
-  
-  # Network Settings
- # options(shiny.host = '0.0.0.0')
-#  options(shiny.port = 8080)
 }
 
 shinyApp(ui, server)
