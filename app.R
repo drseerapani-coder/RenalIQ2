@@ -19,48 +19,41 @@ source("helpers.R")
 source("auth_module.R") 
 source("mod_registration.R")
 source("mod_clinical.R")
-#source("mod_clinical_templates.R")
 source("mod_mobile_rx.R")
 source("mod_lab_flowsheet.R")
 source("mod_lab_ingestion.R")
 source("mod_user_mgmt.R")
 source("clinical_summary.R")
 
+# Load static data
 lab_targets_raw <- read.csv("lab_targets.csv", stringsAsFactors = FALSE)
 lab_config <- split(lab_targets_raw$test_name, lab_targets_raw$category)
 
-# 2. Database Connection
-# 2. Database Connection
+# 2. Database Connection (Non-Blocking)
 pool <- tryCatch({
   pool::dbPool(
     drv      = RPostgres::Postgres(),
-    # Hardcoded values for reliability
     dbname   = "defaultdb", 
     host     = "db-postgresql-blr1-50634-do-user-27163608-0.f.db.ondigitalocean.com",
     user     = "doadmin",
     port     = 25060,
-    # Keep the secret as an environment variable
     password = Sys.getenv("DO_DB_PASSWORD"),
     sslmode  = "require",
-    connect_timeout = 10
+    connect_timeout = 15
   )
 }, error = function(e) {
-  message("DB connection failed: ", e$message)
-  NULL 
+  message("CRITICAL DB CONNECTION FAILURE: ", e$message)
+  return(NULL)
 })
 
-onStop(function() { if (!is.null(pool)) poolClose(pool) })
+onStop(function() { 
+  if (!is.null(pool) && inherits(pool, "Pool")) {
+    poolClose(pool) 
+  }
+})
 
-# 3. Add a "Liveliness" check to ensure pool isn't NULL
-# This prevents the 'signature NULL' error downstream
-if (!inherits(pool, "Pool")) {
-  stop("Database connection object 'pool' was not created correctly.")
-}
-
-# --- UI Layout Functions ---
 # --- UI Layout Functions ---
 secure_ui_contents <- function() {
-  # Note: page_navbar is a top-level layout; it shouldn't be inside fluidPage
   page_navbar(
     title = div(
       style = "display: flex; align-items: center; justify-content: space-between; width: 100%;",
@@ -73,7 +66,6 @@ secure_ui_contents <- function() {
     theme = bs_theme(version = 5, primary = "#26A69A"),
     id = "main_nav",
     
-    # Include shinyjs here so it's available after login
     header = list(shinyjs::useShinyjs()),
     
     nav_panel("1. Registration", registration_ui("reg_mod")),
@@ -92,102 +84,73 @@ secure_ui_contents <- function() {
 
 ui <- uiOutput("root_layout")
 
-# ... (Previous library imports and DB connection code remain the same) ...
-
 # 3. Server Logic
-
-  server <- function(input, output, session) {
-    
-    auth <- auth_server("auth_mod", pool)
-    current_pt <- reactiveVal(NULL)
-    
-    is_authenticated <- reactive({
-      req(auth$is_logged)
-      auth$is_logged() # This will now trigger UI updates instantly on login
-    })
-    
-    # Switch between full layouts
-    output$root_layout <- renderUI({
-      if (is_authenticated()) {
-        secure_ui_contents()
-      } else {
-        # Use fluidPage only for the login screen to center the box
-        fluidPage(
-          theme = bs_theme(version = 5, primary = "#26A69A"),
-          auth_ui("auth_mod")
-        )
-      }
-    })
+server <- function(input, output, session) {
   
-  # --- 3. MODULE SERVERS (STATIC REGISTRATION) ---
+  # A. Setup stable reactives
+  current_pt <- reactiveVal(NULL)
   
-  
-  registration_server("reg_mod", pool, current_pt, auth$user_info)
-  clinical_server("clin_mod", pool, current_pt, auth$user_info)
-  lab_flowsheet_server("lab_mod", pool, current_pt, lab_targets_raw, reactive(input$main_nav), auth$user_info)
-  lab_ingestion_server("lab_ingest_mod", pool, current_pt, auth$user_info)
-  mobile_rx_server("rx_mod", pool, current_pt, auth$user_info)
-  timeline_server("pt_timeline", pool, current_pt)
-  
-  # --- 4. GLOBAL UI RENDERERS ---
-  
-  # Logout Button (appears in the navbar)
-  output$logout_btn_ui <- renderUI({
-    req(is_authenticated())
-    logout_ui("auth_mod")
+  # B. Check Database Availability
+  db_available <- reactive({ 
+    !is.null(pool) && inherits(pool, "Pool") 
   })
   
-  # Patient Header (displays name and ID at the top)
-  output$global_pt_header <- renderUI({
-    req(is_authenticated())
-    pt <- current_pt()
+  # C. Initialize Auth Server ONCE at the top level
+  # This prevents the re-initialization loop causing the "Welcome" flicker
+  auth <- auth_server("auth_mod", pool)
+  
+  # D. Main UI Switcher
+  output$root_layout <- renderUI({
+    # Condition 1: DB Fail
+    if (!db_available()) {
+      return(fluidPage(
+        theme = bs_theme(version = 5, primary = "#26A69A"),
+        div(style="margin-top: 100px; max-width: 600px; margin-left: auto; margin-right: auto;",
+            class = "alert alert-danger",
+            h4("Database Offline"),
+            p("The application is running but cannot reach the database cluster."),
+            tags$small("Check DigitalOcean Trusted Sources/Firewall.")
+        )
+      ))
+    }
     
-    if (is.null(pt)) {
-      span("No Patient Selected", class = "badge bg-secondary text-white", style="opacity: 0.8;")
+    # Condition 2: Authenticated
+    if (auth$is_logged()) {
+      secure_ui_contents()
     } else {
-      # Robust name detection logic
-      p_name <- "Unknown Patient"
-      if (!is.null(pt$full_name)) {
-        p_name <- pt$full_name
-      } else if (!is.null(pt$first_name)) {
-        p_name <- paste(pt$first_name, pt$last_name)
-      } else if (!is.null(pt$name)) {
-        p_name <- pt$name
-      }
-      
-      span(
-        style = "display: flex; align-items: center; gap: 10px; margin-left: 15px;",
-        # Changed color from white to a dark gray/black for visibility
-        span(toupper(p_name), style = "color: #333; font-weight: bold; font-size: 1.1rem;"),
-        span(paste("ID:", pt$id), class = "badge bg-dark text-white", style="font-size: 0.7rem;")
+      # Condition 3: Login Screen
+      fluidPage(
+        theme = bs_theme(version = 5, primary = "#26A69A"),
+        auth_ui("auth_mod")
       )
     }
   })
   
-  # --- 5. STATE CLEANUP LOGIC ---
-  # If the user logs out, reset the selected patient so the next person 
-  # starts with a fresh session and no leaked data.
-  observeEvent(is_authenticated(), {
-    if (!is_authenticated()) {
-      current_pt(NULL)
-    }
+  # E. Trigger Module Servers ONLY on Login Success
+  # Using observeEvent prevents the modules from re-firing constantly
+  observeEvent(auth$is_logged(), {
+    req(auth$is_logged())
+    
+    registration_server("reg_mod", pool, current_pt, auth$user_info)
+    clinical_server("clin_mod", pool, current_pt, auth$user_info)
+    lab_flowsheet_server("lab_mod", pool, current_pt, lab_targets_raw, reactive(input$main_nav), auth$user_info)
+    lab_ingestion_server("lab_ingest_mod", pool, current_pt, auth$user_info)
+    mobile_rx_server("rx_mod", pool, current_pt, auth$user_info)
+    timeline_server("pt_timeline", pool, current_pt)
+    user_management_server("user_mgmt", pool)
+    
+    message("Session started for user: ", auth$user_info()$username)
   })
   
-  # Logic to clear clinical notes/inputs when a new patient is selected
-  # Most modules should handle this internally with req(current_pt())
-  observeEvent(current_pt(), {
-    if (is.null(current_pt())) {
-      # This is where you'd trigger any extra cleanup logic if needed
-      message("Patient context cleared. Modules resetting...")
-    }
-  }, ignoreNULL = FALSE)
+  # F. Global UI Renderers
+  output$logout_btn_ui <- renderUI({
+    req(auth$is_logged())
+    logout_ui("auth_mod")
+  })
   
-  # Render the admin UI only if the user is an admin
   output$admin_panel_ui <- renderUI({
-    req(is_authenticated())
-    # Call the reactive to get the actual data frame
+    req(auth$is_logged())
     user_data <- auth$user_info() 
-    
     if (!is.null(user_data) && user_data$role[1] == "admin") {
       user_management_ui("user_mgmt")
     } else {
@@ -195,13 +158,31 @@ ui <- uiOutput("root_layout")
     }
   })
   
-  # Call the admin module server
-  # We assume you'll create user_management_server
-  user_management_server("user_mgmt", pool)
-  # At the bottom of app.R
-  options(shiny.host = '0.0.0.0')
-  options(shiny.port = 3838) # Matches EXPOSE in Dockerfile
+  output$global_pt_header <- renderUI({
+    req(auth$is_logged())
+    pt <- current_pt()
+    if (is.null(pt)) {
+      span("No Patient Selected", class = "badge bg-secondary text-white", style="opacity: 0.8;")
+    } else {
+      p_name <- if (!is.null(pt$full_name)) pt$full_name else "Selected Patient"
+      span(
+        style = "display: flex; align-items: center; gap: 10px; margin-left: 15px;",
+        span(toupper(p_name), style = "color: #333; font-weight: bold; font-size: 1.1rem;"),
+        span(paste("ID:", pt$id), class = "badge bg-dark text-white", style="font-size: 0.7rem;")
+      )
+    }
+  })
   
+  # G. Cleanup on Logout
+  observe({
+    if (!auth$is_logged()) {
+      current_pt(NULL)
+    }
+  })
+  
+  # Network Settings
+  options(shiny.host = '0.0.0.0')
+  options(shiny.port = 3838)
 }
 
 shinyApp(ui, server)

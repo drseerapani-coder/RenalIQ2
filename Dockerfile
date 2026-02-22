@@ -1,5 +1,5 @@
 # Use the official R-Shiny base image
-FROM rocker/shiny:4.3.0
+FROM rocker/shiny:latest
 
 # 1. Install System Dependencies 
 RUN apt-get update && apt-get install -y \
