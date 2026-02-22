@@ -32,6 +32,15 @@ lab_config <- split(lab_targets_raw$test_name, lab_targets_raw$category)
 # 2. Database Connection (RE-CLEANED)
 pool <- tryCatch({
   db_pass <- Sys.getenv("DO_DB_PASSWORD")
+  cert_path <- "/srv/shiny-server/ca-certificate.crt"
+  
+  # DEBUG: Print to logs so we can see what R sees
+  message("Checking for cert at: ", cert_path)
+  if (!file.exists(cert_path)) {
+    message("FILE STATUS: MISSING")
+  } else {
+    message("FILE STATUS: FOUND")
+  }
   
   pool::dbPool(
     drv      = RPostgres::Postgres(),
@@ -41,8 +50,7 @@ pool <- tryCatch({
     port     = 25060,
     password = db_pass,
     sslmode  = "require",
-    # Pass this directly, NOT inside 'extras'
-    sslrootcert = "ca-certificate.crt", 
+    sslrootcert = cert_path, 
     connect_timeout = 15
   )
 }, error = function(e) {
