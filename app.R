@@ -30,16 +30,19 @@ lab_targets_raw <- read.csv("lab_targets.csv", stringsAsFactors = FALSE)
 lab_config <- split(lab_targets_raw$test_name, lab_targets_raw$category)
 
 # 2. Database Connection
+# 2. Database Connection
 pool <- tryCatch({
   pool::dbPool(
     drv      = RPostgres::Postgres(),
-    dbname   = Sys.getenv("DO_DB_NAME", unset = "defaultdb"), 
-    host     = Sys.getenv("DO_DB_HOST"),
-    user     = Sys.getenv("DO_DB_USER", unset = "doadmin"),
+    # Hardcoded values for reliability
+    dbname   = "defaultdb", 
+    host     = "db-postgresql-blr1-50634-do-user-27163608-0.f.db.ondigitalocean.com",
+    user     = "doadmin",
+    port     = 25060,
+    # Keep the secret as an environment variable
     password = Sys.getenv("DO_DB_PASSWORD"),
-    port     = as.integer(Sys.getenv("DO_DB_PORT", unset = "25060")),
-    #sslrootcert = Sys.getenv("DO_SSLROOTCERT", unset = "ca-certificate.crt"),
-    sslmode  = "require"
+    sslmode  = "require",
+    connect_timeout = 10
   )
 }, error = function(e) {
   message("DB connection failed: ", e$message)
