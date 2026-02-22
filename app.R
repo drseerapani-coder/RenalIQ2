@@ -30,17 +30,9 @@ lab_targets_raw <- read.csv("lab_targets.csv", stringsAsFactors = FALSE)
 lab_config <- split(lab_targets_raw$test_name, lab_targets_raw$category)
 
 # 2. Database Connection (RE-CLEANED)
+
 pool <- tryCatch({
   db_pass <- Sys.getenv("DO_DB_PASSWORD")
-  cert_path <- "/srv/shiny-server/ca-certificate.crt"
-  
-  # DEBUG: Print to logs so we can see what R sees
-  message("Checking for cert at: ", cert_path)
-  if (!file.exists(cert_path)) {
-    message("FILE STATUS: MISSING")
-  } else {
-    message("FILE STATUS: FOUND")
-  }
   
   pool::dbPool(
     drv      = RPostgres::Postgres(),
@@ -50,13 +42,16 @@ pool <- tryCatch({
     port     = 25060,
     password = db_pass,
     sslmode  = "require",
-    sslrootcert = cert_path, 
-    connect_timeout = 15
+    sslrootcert = "ca-certificate.crt",
+    # If it can't connect in 3 seconds, fail and let the app start anyway
+    connect_timeout = 3 
   )
 }, error = function(e) {
-  message("CRITICAL DB CONNECTION FAILURE: ", e$message)
-  return(NULL)
+  message("CRITICAL DB FAILURE: ", e$message)
+  return(NULL) 
 })
+
+
 onStop(function() { 
   if (!is.null(pool) && inherits(pool, "Pool")) {
     poolClose(pool) 
@@ -192,8 +187,8 @@ server <- function(input, output, session) {
   })
   
   # Network Settings
-  options(shiny.host = '0.0.0.0')
-  options(shiny.port = 8080)
+ # options(shiny.host = '0.0.0.0')
+#  options(shiny.port = 8080)
 }
 
 shinyApp(ui, server)
