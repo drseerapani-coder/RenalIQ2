@@ -195,6 +195,9 @@ ui <- uiOutput("root_layout")
   # Call the admin module server
   # We assume you'll create user_management_server
   user_management_server("user_mgmt", pool)
+  # At the bottom of app.R
+  options(shiny.host = '0.0.0.0')
+  options(shiny.port = 3838) # Matches EXPOSE in Dockerfile
   
 }
 
