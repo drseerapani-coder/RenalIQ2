@@ -38,7 +38,7 @@ pool <- tryCatch({
     user     = Sys.getenv("DO_DB_USER"),
     password = Sys.getenv("DO_DB_PASSWORD"),
     port     = as.integer(Sys.getenv("DO_DB_PORT", unset = "25060")),
-    sslrootcert = Sys.getenv("DO_SSLROOTCERT", unset = "ca-certificate.crt"),
+    #sslrootcert = Sys.getenv("DO_SSLROOTCERT", unset = "ca-certificate.crt"),
     sslmode  = "require"
   )
 }, error = function(e) {

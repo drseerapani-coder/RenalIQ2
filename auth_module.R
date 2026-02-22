@@ -1,16 +1,21 @@
-# Add this function to auth_module.R
+library(shiny)
+library(sodium)
+library(stringr)
+library(glue)
+
+# UI Component for Sign Out
 logout_ui <- function(id) {
   ns <- NS(id)
   actionButton(
     ns("logout_btn"), 
     "Sign Out", 
-    # Changed from btn-outline-light to btn-outline-dark for visibility
     class = "btn-outline-dark btn-sm", 
     icon = icon("sign-out-alt"),
     style = "margin-left: 15px;"
   )
 }
 
+# Main Login UI
 auth_ui <- function(id) {
   ns <- NS(id)
   tagList(
@@ -33,45 +38,45 @@ auth_ui <- function(id) {
   )
 }
 
+# Server Logic
 auth_server <- function(id, pool) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
-    
     user_auth <- reactiveValues(is_logged = FALSE, user_info = NULL)
     
     observeEvent(input$login_btn, {
       req(input$user_id, input$password)
       
-      # 1. Clean inputs to prevent trivial mismatches
+      # 1. Clean inputs
       clean_user <- str_trim(input$user_id)
       
-      # 2. Case-insensitive query
-      query <- "SELECT id, username, full_name, role, password_hash 
-                FROM users 
-                WHERE LOWER(username) = LOWER($1)"
-      
+      # 2. Database Query with Error Handling
       user_data <- tryCatch({
-        dbGetQuery(pool, query, list(clean_user))
+        dbGetQuery(pool, 
+                   "SELECT id, username, full_name, role, password_hash FROM users WHERE LOWER(username) = LOWER($1)", 
+                   list(clean_user))
       }, error = function(e) {
-        showNotification("Database Access Error", type = "error")
+        showNotification(paste("Database Error:", e$message), type = "error", duration = NULL)
         return(NULL)
       })
       
       # 3. Validation Logic
       if(!is.null(user_data) && nrow(user_data) == 1) {
-        
-        # Verify the hash exists and isn't empty
         hash_in_db <- user_data$password_hash[1]
         
+        # Verify the hash exists
         if (is.na(hash_in_db) || hash_in_db == "") {
           output$error_msg <- renderUI({ p("Account configuration error", class="text-danger mt-2 text-center") })
           return()
         }
         
-        # The actual Sodium check
+        # SODIUM Check
         is_valid <- tryCatch({
           sodium::password_verify(hash_in_db, input$password)
-        }, error = function(e) { FALSE })
+        }, error = function(e) { 
+          showNotification("Password hashing error. Check DB format.", type = "warning")
+          FALSE 
+        })
         
         if (is_valid) {
           user_auth$is_logged <- TRUE
@@ -81,16 +86,17 @@ auth_server <- function(id, pool) {
           output$error_msg <- renderUI({ p("Invalid username or password", class="text-danger mt-2 text-center") })
         }
       } else {
-        output$error_msg <- renderUI({ p("Invalid username or password", class="text-danger mt-2 text-center") })
+        output$error_msg <- renderUI({ p("User not found", class="text-danger mt-2 text-center") })
       }
     })
     
+    # Logout Logic
     observeEvent(input$logout_btn, {
       user_auth$is_logged <- FALSE
       user_auth$user_info <- NULL
       updateTextInput(session, "user_id", value = "")
       updateTextInput(session, "password", value = "") 
-      showNotification("You have been signed out.", type = "warning")
+      showNotification("Signed out.", type = "warning")
     })
     
     return(list(
