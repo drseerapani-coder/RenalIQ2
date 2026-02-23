@@ -74,6 +74,8 @@ secure_ui_contents <- function() {
       shinyjs::useShinyjs(),
       tags$style(HTML("
         .navbar-brand { font-weight: bold; color: #26A69A !important; }
+        
+        /* 1. Lower the z-index of the sticky patient header */
         .pt-display-header { 
           background: #f8f9fa; 
           padding: 10px 15px; 
@@ -83,8 +85,23 @@ secure_ui_contents <- function() {
           justify-content: space-between;
           position: sticky;
           top: 0;
-          z-index: 1000;
+          z-index: 900; /* Reduced from 1000 */
         }
+
+        /* 2. Ensure the Navbar and its dropdowns stay on top */
+        .navbar {
+          z-index: 1050 !important; 
+        }
+        
+        .dropdown-menu {
+          z-index: 1100 !important;
+        }
+
+        /* 3. Fix for mobile: ensure dropdowns aren't clipped by hidden overflow */
+        .navbar-collapse {
+          overflow: visible !important;
+        }
+
         @media (max-width: 576px) {
           .selected-pt-name { font-size: 0.9rem !important; }
         }
@@ -117,7 +134,7 @@ server <- function(input, output, session) {
   
   refresh_timeline <- reactiveVal(0)
   
-  # 2. Increment it whenever a save happens in another module
+  # 2. Increment it whenever a save happens in another moduleglobal
   observeEvent(input$save_visit_button, {
     refresh_timeline(refresh_timeline() + 1)
   })
