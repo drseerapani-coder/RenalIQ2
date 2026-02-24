@@ -7,25 +7,49 @@ clinical_ui <- function(id) {
   ns <- NS(id)
   
   tagList(
-    # Essential for the locking/disabling functionality
     useShinyjs(),
+    tags$head(
+      tags$style(HTML(paste0("
+        /* Compact Vitals & Followup Cards */
+        .vitals-card { border-left: 4px solid #007bff; background-color: #f8f9fa; padding: 10px !important; margin-bottom: 8px !important; }
+        .followup-card { border-left: 4px solid #6f42c1; background-color: #f3f0ff; padding: 8px 12px !important; margin-bottom: 10px !important; }
+        
+        /* Compact Radio Buttons */
+        .radio-group-container .shiny-options-group { 
+            display: flex; flex-wrap: wrap; gap: 4px; background: white; 
+            padding: 4px 8px !important; border-radius: 6px; border: 1px solid #dee2e6;
+        }
+        .radio-group-container label { 
+            font-weight: 600; font-size: 0.75rem; cursor: pointer; 
+            padding: 2px 6px; border-radius: 4px; margin-bottom: 0px !important;
+        }
+        
+        /* Layout Adjustments */
+        .card-header { background-color: white !important; border-bottom: 1px solid #eee; padding: 10px 15px !important; }
+        .badge-pid { font-size: 0.85rem; padding: 0.4em 0.6em; }
+        .handsontable { border-radius: 6px; overflow: hidden; font-size: 13px; }
+        
+        /* Compact Form Elements */
+        .form-group { margin-bottom: 0px !important; }
+        .control-label { font-size: 0.8rem; font-weight: bold; margin-bottom: 2px !important; }
+        .form-control { padding: 4px 8px; height: auto; }
+        
+        /* Visit Tile Styling */
+        .visit-tile { font-size: 0.9rem; cursor: pointer; transition: 0.2s; }
+        .visit-tile:hover { background-color: #f0f4f8; }
+      ")))
+    ),
     
     page_sidebar(
       sidebar = sidebar(
-        title = "Visit History",
-        width = 300,
-        
-        # Action button to clear fields and start fresh
-        actionButton(ns("new_visit_btn"), "Start New Empty Note", 
+        title = div(icon("hospital-user"), "Clinical Portal"),
+        width = 280,
+        actionButton(ns("new_visit_btn"), "New Empty Note", 
                      class="btn-success w-100 mb-2", 
                      icon = icon("plus")),
-        
-        # Delete button appears only when a visit is selected
         uiOutput(ns("delete_visit_ui")),
-        
-        hr(),
-        
-        # Scrollable container for the past visit tiles
+        hr(style="margin: 10px 0;"),
+        tags$label("Visit History", style="font-weight: bold; color: #666; font-size: 0.8rem; margin-left: 5px;"),
         uiOutput(ns("visit_tiles_ui"))
       ),
       
@@ -33,64 +57,83 @@ clinical_ui <- function(id) {
         full_screen = TRUE,
         card_header(
           div(class="d-flex justify-content-between align-items-center",
-              textOutput(ns("note_header")),
+              div(style="font-size: 1.1rem; font-weight: 600; color: #2c3e50;",
+                  textOutput(ns("note_header"), inline = TRUE)
+              ),
               div(class="d-flex align-items-center gap-2",
-                  # The Edit Button only appears when a record is locked
+                  # Header Action Area: Edit and Save buttons live here now
                   uiOutput(ns("edit_button_ui")),
+                  uiOutput(ns("save_button_header_ui")),
                   uiOutput(ns("pid_badge_ui"))
               )
           )
         ),
         
         card_body(
-          # Message that appears when fields are locked
           uiOutput(ns("lock_message")),
           
-          # Container for all clinical inputs
           div(id = ns("clinical_input_form"),
               
-              # Vitals Section
-              div(class = "vitals-container mb-4", 
+              # ROW 1: COMPACT VITALS
+              div(class = "vitals-card rounded-3", 
                   layout_column_wrap(
-                    width = 1/5,
-                    textInput(ns("v_bp"), "BP (mmHg)", placeholder = "120/80"),
-                    numericInput(ns("v_hr"), "Pulse (bpm)", value = NA),
-                    numericInput(ns("v_weight"), "Weight (kg)", value = NA),
-                    textInput(ns("v_temp"), "Temp (F)", placeholder = "98.4"),
-                    dateInput(ns("v_followup"), "Follow-up Date", value = NA)
+                    width = 1/4, gap = "10px",
+                    textInput(ns("v_bp"), div(icon("heart-pulse"), " BP"), placeholder = "120/80"),
+                    numericInput(ns("v_hr"), div(icon("gauge-high"), " HR"), value = NA),
+                    numericInput(ns("v_weight"), div(icon("weight-scale"), " Wt (kg)"), value = NA),
+                    textInput(ns("v_temp"), div(icon("temperature-half"), " Temp"), placeholder = "98.4")
                   )
               ),
               
-              tags$hr(style = "clear: both; margin: 20px 0; border-top: 2px solid #eee;"),
+              # ROW 2: TIGHT FOLLOW-UP SECTION
+              div(class = "followup-card rounded-3",
+                  div(class="d-flex flex-row gap-3 align-items-center",
+                      div(class="radio-group-container", style="flex-grow: 1;",
+                          tags$label(icon("clock"), " Quick Interval (Skips Sundays)", 
+                                     style="font-weight: bold; font-size: 0.8rem; color: #6f42c1; display: block;"),
+                          radioButtons(ns("quick_interval"), NULL,
+                                       choices = c("10D" = "10", "1W" = "7", "2W" = "14", "3W" = "21", 
+                                                   "1M" = "30", "6W" = "42", "3M" = "90", "4M" = "120", 
+                                                   "6M" = "180", "1Y" = "365"),
+                                       inline = TRUE, selected = character(0))
+                      ),
+                      div(style="min-width: 160px;",
+                          tags$label(icon("calendar-day"), " Follow-up Date *", 
+                                     style="font-weight: bold; font-size: 0.8rem; display: block;"),
+                          dateInput(ns("v_followup"), label = NULL, value = NA, width = "100%")
+                      )
+                  )
+              ),
               
-              # Notes and PMHx Section
+              # ROW 3: NOTES AND GLOBAL PMHx
               layout_column_wrap(
                 width = NULL,
-                style = htmltools::css(grid_template_columns = "1fr 1fr"), 
+                style = htmltools::css(grid_template_columns = "1.2fr 0.8fr"), 
+                gap = "15px",
                 
-                # Left Side: Clinical Notes
-                div(style = "display: flex; flex-direction: column;",
-                    textAreaInput(ns("clinic_notes"), "Examination & Plan", 
-                                  rows = 15, width = "100%", 
-                                  placeholder = "Enter findings, assessment, and treatment plan...")
+                # Left Side: Examination & Plan
+                div(class="d-flex flex-column",
+                    tags$label(icon("file-lines"), " Examination & Plan", 
+                               style="font-weight: bold; font-size: 0.85rem; margin-bottom: 5px;"),
+                    textAreaInput(ns("clinic_notes"), NULL, 
+                                  rows = 14, width = "100%", 
+                                  placeholder = "Findings, assessment, plan...")
                 ),
                 
-                # Right Side: PMHx Table
+                # Right Side: Global PMHx (Decoupled from visits)
                 div(
-                  tags$label("Past Medical History", style="font-weight: bold;"),
-                  rHandsontableOutput(ns("past_medical_history_table")),
-                  div(id = ns("pmhx_controls"), class = "mt-2 d-flex gap-2",
-                      actionButton(ns("add_past_medical_history_row"), "Add Row", class="btn-sm btn-outline-secondary"),
-                      actionButton(ns("del_past_medical_history_row"), "Del Row", class="btn-sm btn-outline-danger")
-                  )
+                  div(class="d-flex justify-content-between align-items-center mb-1",
+                      tags$label(icon("history"), " Past Medical History", 
+                                 style="font-weight: bold; font-size: 0.85rem;"),
+                      div(id = ns("pmhx_controls"), class = "d-flex gap-1",
+                          actionButton(ns("add_past_medical_history_row"), "", icon = icon("plus"), class="btn-xs btn-outline-primary"),
+                          actionButton(ns("del_past_medical_history_row"), "", icon = icon("trash"), class="btn-xs btn-outline-danger")
+                      )
+                  ),
+                  rHandsontableOutput(ns("past_medical_history_table"))
                 )
               )
           )
-        ),
-        
-        card_footer(
-          # This button will be hidden via shinyjs when the record is locked
-          actionButton(ns("save_note"), "Save Visit Record", class="btn-primary btn-lg w-100")
         )
       )
     )
@@ -100,63 +143,31 @@ clinical_ui <- function(id) {
 clinical_server <- function(id, pool, current_pt, user_info) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
-    refresh_visits <- reactiveVal(0)
     
-    # --- Local Module State ---
+    # --- Reactive States ---
+    refresh_visits <- reactiveVal(0)
+    is_locked <- reactiveVal(FALSE)
     note_state <- reactiveValues(
       active_visit_id = NULL,
       active_visit_date = NULL
     )
+    
+    # PMH is global to the patient - loaded once per patient selection
     pmh_data <- reactiveVal(data.frame(Condition = character(), Year = character(), stringsAsFactors = FALSE))
     
-    # Inside clinical_server
-    is_locked <- reactiveVal(FALSE)
-    
-    # Helper to toggle UI state
-    observe({
-      if (is_locked()) {
-        shinyjs::disable("v_bp")
-        shinyjs::disable("v_hr")
-        shinyjs::disable("v_weight")
-        shinyjs::disable("v_temp")
-        shinyjs::disable("v_followup")
-        shinyjs::disable("clinic_notes")
-      #  shinyjs::disable("add_past_medical_history_row")
-       # shinyjs::disable("del_past_medical_history_row")
-        shinyjs::hide("save_note")
-      } else {
-        shinyjs::enable("v_bp")
-        shinyjs::enable("v_hr")
-        shinyjs::enable("v_weight")
-        shinyjs::enable("v_temp")
-        shinyjs::enable("v_followup")
-        shinyjs::enable("clinic_notes")
-       # shinyjs::enable("add_past_medical_history_row")
-       # shinyjs::enable("del_past_medical_history_row")
-        shinyjs::show("save_note")
+    # Render the Save button in the header only when unlocked
+    output$save_button_header_ui <- renderUI({
+      if (!is_locked()) {
+        actionButton(ns("save_note"), "Save Visit Record", 
+                     class = "btn-sm btn-primary shadow-sm", 
+                     icon = icon("floppy-disk"))
       }
     })
     
-    # Display message when locked
-    output$lock_message <- renderUI({
-      req(is_locked())
-      div(class="alert alert-info py-2", icon("info-circle"), 
-          " This record is finalized. Click 'Edit Record' in the header to make changes.")
-    })
-    
-    # Edit Button UI
-    output$edit_button_ui <- renderUI({
-      req(note_state$active_visit_id, is_locked())
-      actionButton(ns("unlock_btn"), "Edit Record", class="btn-sm btn-warning me-2", icon = icon("edit"))
-    })
-    
-    # Unlock Handler
-    observeEvent(input$unlock_btn, { is_locked(FALSE) })
-    
-    # --- INTERNAL HELPER: RESET UI ---
+    # --- 1. RESET UI HELPER ---
     reset_clinical_ui <- function() {
       note_state$active_visit_id <- NULL
-      note_state$active_visit_date <- as.character(Sys.Date())
+      note_state$active_visit_date <- format(Sys.Date(), "%d %b %Y")
       
       updateTextInput(session, "v_bp", value = "")
       updateNumericInput(session, "v_hr", value = NA)
@@ -164,298 +175,195 @@ clinical_server <- function(id, pool, current_pt, user_info) {
       updateTextInput(session, "v_temp", value = "")
       updateTextAreaInput(session, "clinic_notes", value = "")
       updateDateInput(session, "v_followup", value = NA)
-      
-      # Reset PMH to a clean template
-      pmh_data(data.frame(Condition = "", Year = "", stringsAsFactors = FALSE))
+      updateRadioButtons(session, "quick_interval", selected = character(0))
+      # Note: pmh_data is NOT reset here to keep it persistent for the patient
     }
     
-    # --- UI OUTPUTS ---
-    output$pid_badge_ui <- renderUI({
-      req(current_pt())
-      span(class="badge bg-secondary", paste("PID:", current_pt()$id))
-    })
-    
-    output$note_header <- renderText({
-      if (is.null(note_state$active_visit_id)) {
-        paste("New Clinical Note -", format(Sys.Date(), "%d %b %Y"))
-      } else {
-        paste("Viewing Record:", note_state$active_visit_date)
-      }
-    })
-    
-    output$visit_tiles_ui <- renderUI({
-      req(current_pt())
-      refresh_visits() 
-      
-      df <- dbGetQuery(pool, 
-                       "SELECT id, visit_date FROM visitsmodule WHERE patient_id::text = $1 ORDER BY visit_date DESC", 
-                       list(as.character(current_pt()$id)))
-      
-      if(nrow(df) == 0) return(p("No previous visits.", class="text-muted p-3 text-center"))
-      
-      tagList(
-          lapply(1:nrow(df), function(i) {
-          visit_id <- df$id[i]
-          v_date <- as.Date(df$visit_date[i])
-          is_active <- identical(as.integer(visit_id), as.integer(note_state$active_visit_id))
-          
-          div(style = "margin-bottom: 8px;",
-              actionButton(
-                inputId = ns(paste0("tile_trigger_", visit_id)),
-                label = tagList(
-                  div(style="display: flex; justify-content: space-between; width: 100%;",
-                      span(icon("calendar-day"), style="margin-right: 10px;"),
-                      span(format(v_date, "%d %b %Y"), style="font-weight: 600; flex-grow: 1;"),
-                      if(is_active) icon("chevron-right") else ""
-                  )
-                ),
-                class = if(is_active) "btn btn-primary w-100 shadow-sm" else "btn btn-outline-dark w-100 text-start",
-                onclick = sprintf("Shiny.setInputValue('%s', %d, {priority:'event'})", ns("select_visit"), visit_id)
-              )
-          )
-        })
-      )
-    })
-    
-    output$delete_visit_ui <- renderUI({
-      req(note_state$active_visit_id)
-      actionButton(ns("confirm_delete_btn"), "Delete Selected Visit", class="btn-outline-danger w-100 btn-sm")
-    })
-    
-    # --- EVENT HANDLERS ---
-    
-    # Triggered when global patient selection changes
+    # --- 2. GLOBAL PATIENT OBSERVER (PMHx Loading) ---
     observeEvent(current_pt(), {
-      reset_clinical_ui() # Clear everything first
       req(current_pt())
+      reset_clinical_ui()
       
-      # Load PMH for the specific patient
+      # Fetch PMH for the patient (Global record)
       pt_id <- as.character(current_pt()$id)
       res <- tryCatch({
         dbGetQuery(pool, "SELECT condition_text, onset_date FROM past_medical_history WHERE registration_id::text = $1", list(pt_id))
-      }, error = function(e) NULL)
+      }, error = function(e) {
+        message("PMHx Load Error: ", e$message)
+        NULL
+      })
       
       if(!is.null(res) && nrow(res) > 0) {
         colnames(res) <- c("Condition", "Year")
         pmh_data(res)
-      }
-    }, ignoreNULL = FALSE)
-    
-    # Start New Empty Note
-    # Start New Empty Note
-    observeEvent(input$new_visit_btn, {
-      # 1. Clear all inputs (BP, HR, Notes, PMHx table, etc.)
-      reset_clinical_ui()
-      
-      # 2. UNLOCK THE RECORD
-      # This enables all inputs and shows the 'Save' button via the reactive observer
-      is_locked(FALSE)
-      
-      # 3. Reset the state to "New Note" mode
-      note_state$active_visit_id <- NULL
-      note_state$active_visit_date <- format(Sys.Date(), "%d %b %Y")
-      
-      showNotification("Ready for new entry. Fields unlocked.", type = "message")
-    })
-    
-    # Load Existing Visit
-    # Load Existing Visit
-    # Load Existing Visit
-    observeEvent(input$select_visit, {
-      vid <- input$select_visit
-      req(vid)
-      
-      # 1. Fetch record from DB
-      res <- dbGetQuery(pool, 
-                        "SELECT visit_date, visit_json, patient_id FROM visitsmodule WHERE id = $1::int", 
-                        list(as.integer(vid)))
-      req(nrow(res) > 0)
-      
-      # 2. Update local state
-      note_state$active_visit_id <- vid
-      note_state$active_visit_date <- format(as.Date(res$visit_date[1]), "%d %b %Y")
-      
-      # 3. Parse JSON data
-      data <- tryCatch({ 
-        val <- jsonlite::fromJSON(res$visit_json[1]) 
-        if(is.null(val)) list() else val
-      }, error = function(e) list())
-      
-      # 4. Update UI Inputs
-      updateTextInput(session, "v_bp", value = data$vitals$bp %||% "")
-      updateNumericInput(session, "v_hr", value = data$vitals$hr %||% NA)
-      updateNumericInput(session, "v_weight", value = data$vitals$weight %||% NA)
-      updateTextInput(session, "v_temp", value = data$vitals$temp %||% "")
-      updateTextAreaInput(session, "clinic_notes", value = data$clinic_notes %||% "")
-      
-      # Handle Follow-up Date
-      f_date <- data$followup_date
-      if(!is.null(f_date) && !is.na(f_date) && is.character(f_date) && nzchar(f_date)) {
-        updateDateInput(session, "v_followup", value = as.Date(f_date))
-      } else {
-        updateDateInput(session, "v_followup", value = NA)
-      }
-      
-      # 5. Load PMHx for this patient (Syncing the table with the record)
-      pt_id <- as.character(res$patient_id[1])
-      pmh_res <- tryCatch({
-        dbGetQuery(pool, 
-                   "SELECT condition_text, onset_date FROM past_medical_history WHERE registration_id::text = $1", 
-                   list(pt_id))
-      }, error = function(e) NULL)
-      
-      if(!is.null(pmh_res) && nrow(pmh_res) > 0) {
-        colnames(pmh_res) <- c("Condition", "Year")
-        pmh_data(pmh_res)
       } else {
         pmh_data(data.frame(Condition = character(), Year = character(), stringsAsFactors = FALSE))
       }
+    }, ignoreNULL = FALSE)
+    
+    # --- 3. UI LOCKING CONTROL ---
+    observe({
+      toggle_state <- !is_locked()
+      fields <- c("v_bp", "v_hr", "v_weight", "v_temp", "v_followup", "clinic_notes", "quick_interval")
       
-      # 6. LOCK THE RECORD
-      # This triggers the shinyjs disabling and shows the 'Edit Record' button
-      is_locked(TRUE)
+      for (field in fields) {
+        shinyjs::toggleState(field, condition = toggle_state)
+      }
       
-      showNotification(paste("Loaded record for", note_state$active_visit_date), type = "message")
+      shinyjs::toggle("save_note", condition = toggle_state)
+      shinyjs::toggle("pmhx_controls", condition = toggle_state)
     })
     
-    # SAVE VISIT RECORD
-    # SAVE VISIT RECORD
-    observeEvent(input$save_note, {
-      req(current_pt(), user_info())
-      pt_id <- as.integer(current_pt()$id)
+    # --- 4. FOLLOW-UP INTERVAL LOGIC (Skip Sundays) ---
+    observeEvent(input$quick_interval, {
+      req(input$quick_interval)
+      days_to_add <- as.numeric(input$quick_interval)
+      target_date <- Sys.Date() + days_to_add
       
-      # Check if a record already exists for TODAY for this patient
-      # (Only check if we aren't already editing a specific record)
-      existing_record <- dbGetQuery(pool, 
-                                    "SELECT id FROM visitsmodule WHERE patient_id::text = $1 AND visit_date = CURRENT_DATE", 
-                                    list(as.character(pt_id)))
+      if (format(target_date, "%w") == "0") {
+        target_date <- target_date + 1 
+        showNotification("Date adjusted to Monday to avoid Sunday.", type = "message")
+      }
+      updateDateInput(session, "v_followup", value = target_date)
+    })
+    
+    # --- 5. VISIT HISTORY SIDEBAR ---
+    output$visit_tiles_ui <- renderUI({
+      refresh_visits() 
+      req(current_pt())
       
-      if (is.null(note_state$active_visit_id) && nrow(existing_record) > 0) {
-        # Conflict found: A record exists for today, but user clicked 'Save' on a 'New Note'
-        showModal(modalDialog(
-          title = "Duplicate Visit Date",
-          span("A visit record already exists for today. Would you like to update the existing record or create a second entry for today?"),
-          footer = tagList(
-            actionButton(ns("save_as_new"), "Save as New Entry", class = "btn-info"),
-            actionButton(ns("save_overwrite"), "Update Existing Record", class = "btn-warning"),
-            modalButton("Cancel")
-          )
-        ))
-      } else {
-        # No conflict or already in "Edit Mode": Proceed with standard save
-        execute_save_logic()
+      visits <- dbGetQuery(pool, 
+                           "SELECT id, visit_date FROM visitsmodule WHERE patient_id = $1 ORDER BY visit_date DESC", 
+                           list(as.integer(current_pt()$id)))
+      
+      if(nrow(visits) == 0) return(p("No past visits found.", class="text-muted ps-2 mt-2"))
+      
+      lapply(1:nrow(visits), function(i) {
+        div(class="mb-2",
+            actionButton(ns(paste0("load_visit_", visits$id[i])), 
+                         label = div(class="d-flex justify-content-between w-100",
+                                     span(icon("calendar-day"), " ", format(as.Date(visits$visit_date[i]), "%d %b %Y"))),
+                         class="btn btn-outline-secondary w-100 text-start shadow-sm py-2")
+        )
+      })
+    })
+    
+    # Dynamic Observer for Sidebar Links
+    observe({
+      req(current_pt())
+      visits <- dbGetQuery(pool, "SELECT id FROM visitsmodule WHERE patient_id = $1", list(as.integer(current_pt()$id)))
+      for (vid in visits$id) {
+        local({
+          this_vid <- vid
+          observeEvent(input[[paste0("load_visit_", this_vid)]], {
+            res <- dbGetQuery(pool, "SELECT visit_date, visit_json FROM visitsmodule WHERE id = $1", list(as.integer(this_vid)))
+            req(nrow(res) > 0)
+            
+            note_state$active_visit_id <- this_vid
+            note_state$active_visit_date <- format(as.Date(res$visit_date[1]), "%d %b %Y")
+            
+            data <- jsonlite::fromJSON(res$visit_json[1])
+            
+            # Populate Vitals and Notes
+            updateTextInput(session, "v_bp", value = data$vitals$bp %||% "")
+            updateNumericInput(session, "v_hr", value = data$vitals$hr %||% NA)
+            updateNumericInput(session, "v_weight", value = data$vitals$weight %||% NA)
+            updateTextInput(session, "v_temp", value = data$vitals$temp %||% "")
+            updateTextAreaInput(session, "clinic_notes", value = data$clinic_notes %||% "")
+            
+            # Handle Follow-up Date (Safety check for nulls)
+            f_date <- data$followup_date
+            if(!is.null(f_date) && nzchar(f_date)) {
+              updateDateInput(session, "v_followup", value = as.Date(f_date))
+            } else {
+              updateDateInput(session, "v_followup", value = NA)
+            }
+            
+            is_locked(TRUE)
+          })
+        })
       }
     })
     
-    # Helper function to encapsulate the actual DB writing
-    # ---------------------------------------------------------
-    # INTERNAL HELPER: Execute Save Logic
-    # ---------------------------------------------------------
-    # ---------------------------------------------------------
-    # INTERNAL HELPER: Execute Save Logic
-    # ---------------------------------------------------------
+    # --- 6. SAVE LOGIC (Consolidated) ---
     execute_save_logic <- function(force_new = FALSE) {
       req(current_pt(), user_info())
-      
       curr_user <- user_info()$username
       pt_id     <- as.integer(current_pt()$id)
       
-      # 1. Prepare Data Payload
       payload <- list(
-        vitals = list(
-          bp     = input$v_bp, 
-          hr     = input$v_hr, 
-          weight = input$v_weight, 
-          temp   = input$v_temp
-        ),
+        vitals = list(bp = input$v_bp, hr = input$v_hr, weight = input$v_weight, temp = input$v_temp),
         clinic_notes  = input$clinic_notes,
         followup_date = as.character(input$v_followup)
       )
       json_data <- jsonlite::toJSON(payload, auto_unbox = TRUE)
       
       tryCatch({
-        # 2. Database Transaction
         poolWithTransaction(pool, function(con) {
-          
-          # Decide between INSERT (New) or UPDATE (Existing)
+          # A. Save Visit Data
           if (is.null(note_state$active_visit_id) || force_new) {
-            
-            # --- ACTION: INSERT ---
             new_id <- DBI::dbGetQuery(con, glue::glue_sql("
               INSERT INTO visitsmodule (patient_id, visit_date, visit_json, created_by, updated_at) 
               VALUES ({pt_id}, CURRENT_DATE, {json_data}, {curr_user}, NOW()) 
               RETURNING id", .con = con))$id
-            
-            # Update local state so we know we are now viewing a specific record
-            note_state$active_visit_id   <- new_id
-            note_state$active_visit_date <- format(Sys.Date(), "%d %b %Y")
-            
+            note_state$active_visit_id <- new_id
           } else {
-            
-            # --- ACTION: UPDATE ---
             DBI::dbExecute(con, glue::glue_sql("
-              UPDATE visitsmodule 
-              SET visit_json = {json_data}, 
-                  updated_by = {curr_user}, 
-                  updated_at = NOW() 
+              UPDATE visitsmodule SET visit_json = {json_data}, updated_by = {curr_user}, updated_at = NOW() 
               WHERE id = {note_state$active_visit_id}::int", .con = con))
           }
           
-          # --- HANDLE PMHx TABLE ---
+          # B. Save PMHx Table (Global Update)
           if (!is.null(input$past_medical_history_table)) {
             final_pmhx <- hot_to_r(input$past_medical_history_table)
-            
-            # Wipe existing PMHx for this patient to prevent duplicates
-            DBI::dbExecute(con, "DELETE FROM past_medical_history WHERE registration_id = $1", list(pt_id))
-            
-            # Filter rows to avoid saving empty entries
             final_pmhx <- final_pmhx[nzchar(trimws(as.character(final_pmhx$Condition))), ]
+            
+            DBI::dbExecute(con, "DELETE FROM past_medical_history WHERE registration_id = $1", list(pt_id))
             
             if(nrow(final_pmhx) > 0) {
               for(i in 1:nrow(final_pmhx)) {
-                DBI::dbExecute(con, "
-                  INSERT INTO past_medical_history (registration_id, condition_text, onset_date, created_by) 
-                  VALUES ($1, $2, $3, $4)",
-                               list(
-                                 pt_id, 
-                                 as.character(final_pmhx$Condition[i]), 
-                                 as.character(final_pmhx$Year[i]), 
-                                 curr_user
-                               )
-                )
+                DBI::dbExecute(con, "INSERT INTO past_medical_history (registration_id, condition_text, onset_date, created_by) VALUES ($1, $2, $3, $4)",
+                               list(pt_id, as.character(final_pmhx$Condition[i]), as.character(final_pmhx$Year[i]), curr_user))
               }
             }
+            pmh_data(final_pmhx) # Sync local reactive
           }
         })
-        
-        # 3. Post-Save UI State Synchronization
-        removeModal()           # Close conflict modal if it was open
-        is_locked(TRUE)         # Disable input fields
-        
-        # This line forces the sidebar renderUI to re-run and show the new/updated date
-        refresh_visits(refresh_visits() + 1) 
-        
-        showNotification("Visit Record Saved and Finalized.", type = "message")
-        
-      }, error = function(e) {
-        showNotification(paste("Save Error:", e$message), type = "error")
-      })
+        removeModal()
+        is_locked(TRUE)
+        refresh_visits(refresh_visits() + 1)
+        showNotification("Record and Global PMHx Saved.", type = "message")
+      }, error = function(e) { showNotification(paste("Save Error:", e$message), type = "error") })
     }
     
-    # Listeners for the Modal Buttons
-    observeEvent(input$save_as_new, { execute_save_logic(force_new = TRUE) })
-    observeEvent(input$save_overwrite, { 
-      # Find the ID for today's record to ensure we update the right one
-      existing_id <- dbGetQuery(pool, "SELECT id FROM visitsmodule WHERE patient_id::text = $1 AND visit_date = CURRENT_DATE", 
-                                list(as.character(current_pt()$id)))$id[1]
-      note_state$active_visit_id <- existing_id
-      execute_save_logic(force_new = FALSE) 
+    observeEvent(input$save_note, {
+      if (!shiny::isTruthy(input$v_followup)) {
+        showNotification("Follow-up Date is required.", type = "error")
+        return()
+      }
+      
+      pt_id <- as.integer(current_pt()$id)
+      existing <- dbGetQuery(pool, "SELECT id FROM visitsmodule WHERE patient_id = $1 AND visit_date = CURRENT_DATE", list(pt_id))
+      
+      if (is.null(note_state$active_visit_id) && nrow(existing) > 0) {
+        showModal(modalDialog(
+          title = "Existing Record Found",
+          "A record already exists for today. Overwrite it or create a new entry?",
+          footer = tagList(
+            modalButton("Cancel"),
+            actionButton(ns("save_overwrite"), "Overwrite", class="btn-warning"),
+            actionButton(ns("save_as_new"), "Save as New", class="btn-primary")
+          )
+        ))
+      } else { execute_save_logic() }
     })
     
-    # PMHx HANDSONTABLE
+    observeEvent(input$save_as_new, { execute_save_logic(force_new = TRUE) })
+    observeEvent(input$save_overwrite, { execute_save_logic(force_new = FALSE) })
+    
+    # --- 7. PMHx TABLE LOGIC (Fixed Delete) ---
     output$past_medical_history_table <- renderRHandsontable({
       df <- pmh_data()
-      req(df)
       rhandsontable(df, stretchH = "all", height = 300) %>%
         hot_col("Condition", type = "text") %>%
         hot_col("Year", type = "text")
@@ -467,26 +375,83 @@ clinical_server <- function(id, pool, current_pt, user_info) {
     })
     
     observeEvent(input$del_past_medical_history_row, {
-      df <- if(!is.null(input$past_medical_history_table)) hot_to_r(input$past_medical_history_table) else pmh_data()
+      # 1. Get current data from the table (not the reactiveVal, to capture unsaved typing)
+      df <- if(!is.null(input$past_medical_history_table)) {
+        hot_to_r(input$past_medical_history_table)
+      } else {
+        pmh_data()
+      }
+      
+      # 2. Capture the selection
       sel <- input$past_medical_history_table_select
-      if(!is.null(sel$r) && nrow(df) > 0) {
-        pmh_data(df[-sel$r, ])
+      
+      # 3. Robust Deletion Logic
+      if (!is.null(sel) && !is.null(sel$r) && nrow(df) > 0) {
+        # Translate JavaScript 0-index to R 1-index
+        # If the UI sends 0, it means Row 1. So we add 1.
+        row_index <- sel$r 
+        
+        # Safety check: ensure index is within data frame bounds
+        if(row_index > 0 && row_index <= nrow(df)) {
+          pmh_data(df[-row_index, ])
+          showNotification("Row removed. Click Save to apply to database.", type = "message")
+        }
+      } else {
+        # FALLBACK: If selection is lost/null, delete the last row
+        if (nrow(df) > 0) {
+          pmh_data(df[-nrow(df), ])
+          showNotification("No row selected. Removed last row by default.", type = "warning")
+        } else {
+          showNotification("Table is already empty.", type = "error")
+        }
       }
     })
     
-    # DELETION LOGIC
+    # --- 8. DELETION AND HEADER ACTIONS ---
+    output$delete_visit_ui <- renderUI({
+      req(note_state$active_visit_id)
+      actionButton(ns("confirm_delete_btn"), "Delete Selected Visit", class="btn-outline-danger w-100 btn-sm mt-2")
+    })
+    
     observeEvent(input$confirm_delete_btn, {
-      showModal(modalDialog(title = "Delete Visit", "Permanently delete this record?", 
-                            footer = tagList(modalButton("Cancel"), actionButton(ns("execute_delete"), "Delete", class="btn-danger"))))
+      showModal(modalDialog(
+        title = "Confirm Deletion", "Permanently delete this visit record?",
+        footer = tagList(modalButton("Cancel"), actionButton(ns("execute_delete"), "Delete", class="btn-danger"))
+      ))
     })
     
     observeEvent(input$execute_delete, {
       dbExecute(pool, "DELETE FROM visitsmodule WHERE id = $1::int", list(as.integer(note_state$active_visit_id)))
-      
-      refresh_visits(refresh_visits() + 1) # Side panel removes the deleted date immediately
+      refresh_visits(refresh_visits() + 1)
       reset_clinical_ui()
       removeModal()
-      showNotification("Deleted.", type = "warning")
+      showNotification("Record Deleted", type = "warning")
+    })
+    
+    output$edit_button_ui <- renderUI({
+      req(note_state$active_visit_id, is_locked())
+      actionButton(ns("unlock_btn"), "Edit Record", class="btn-sm btn-warning", icon = icon("edit"))
+    })
+    
+    observeEvent(input$unlock_btn, { is_locked(FALSE) })
+    
+    observeEvent(input$new_visit_btn, {
+      reset_clinical_ui()
+      is_locked(FALSE)
+    })
+    
+    # Header and Badge outputs
+    output$pid_badge_ui <- renderUI({
+      req(current_pt())
+      span(class="badge bg-secondary badge-pid", paste("PID:", current_pt()$id))
+    })
+    
+    output$note_header <- renderText({
+      if (is.null(note_state$active_visit_id)) {
+        paste("New Clinical Note -", format(Sys.Date(), "%d %b %Y"))
+      } else {
+        paste("Viewing Record:", note_state$active_visit_date)
+      }
     })
   })
 }

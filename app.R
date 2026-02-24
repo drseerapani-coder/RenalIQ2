@@ -22,7 +22,8 @@ source("mod_registration.R")
 source("mod_clinical.R")
 source("mod_mobile_rx.R")
 source("mod_lab_flowsheet.R")
-source("mod_lab_ingestion.R")
+source("mod_lab_flowsheet_1.R")
+#source("mod_lab_flowsheet.R")
 source("mod_user_mgmt.R")
 source("clinical_summary.R")
 
@@ -163,6 +164,7 @@ server <- function(input, output, session) {
     }
   })
   
+  refresh_val <- reactiveVal(0)
   # CRITICAL: Initialize module servers ONLY after login
   observeEvent(auth$is_logged(), {
     req(auth$is_logged())
@@ -172,7 +174,7 @@ server <- function(input, output, session) {
     lab_flowsheet_server("lab_mod", pool, current_pt, lab_targets_raw, reactive(input$main_nav), auth$user_info)
     lab_ingestion_server("lab_ingest_mod", pool, current_pt, auth$user_info)
     mobile_rx_server("rx_mod", pool, current_pt, auth$user_info)
-    timeline_server("pt_timeline", pool, current_pt, refresh_timeline)
+    timeline_server("pt_timeline", pool, current_pt, refresh_trigger = reactive(refresh_val()))
     user_management_server("user_mgmt", pool)
   })
   
@@ -185,6 +187,7 @@ server <- function(input, output, session) {
   })
   
   # Sticky Header Logic
+  # Sticky Header Logic with Age Calculation
   output$global_pt_header <- renderUI({
     req(auth$is_logged())
     pt <- current_pt()
@@ -194,16 +197,30 @@ server <- function(input, output, session) {
                  span("No Patient Selected", class = "text-muted small italic")))
     }
     
+    # 1. Formatting Name
     f_name <- as.character(pt$first_name %||% "")
     l_name <- as.character(pt$last_name %||% "")
     full_name <- toupper(trimws(paste(f_name, l_name)))
-    
     if(nchar(full_name) == 0) full_name <- "SELECTED PATIENT"
     
+    # 2. Calculate Age
+    # Assumes your database column is named 'dob' or 'date_of_birth'
+    pt_dob <- pt$dob %||% pt$date_of_birth 
+    age_display <- ""
+    
+    if (!is.null(pt_dob) && !is.na(pt_dob)) {
+      # Ensure it's a Date object
+      birth_date <- as.Date(pt_dob)
+      age_val <- floor(time_length(difftime(Sys.Date(), birth_date), "years"))
+      age_display <- paste0(" | Age: ", age_val)
+    }
+    
+    # 3. Render UI
     div(class = "pt-display-header",
         span(class = "selected-pt-name",
              icon("user-circle"), 
-             tags$strong(full_name, style="margin-left: 5px; color: #26A69A;")
+             tags$strong(full_name, style="margin-left: 5px; color: #26A69A;"),
+             span(age_display, style="font-weight: normal; color: #666; margin-left: 5px;")
         ),
         span(paste("ID:", pt$id), class = "badge bg-dark", style="margin-left:5px;")
     )

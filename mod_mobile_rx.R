@@ -202,30 +202,40 @@ mobile_rx_server <- function(id, pool, current_pt, user_info) {
       rx_meds$df <- rx_meds$df[-as.numeric(input$del_rx_idx), ]
     })
     
+    refresh_val <- reactiveVal(0)
+    
     observeEvent(input$save_rx, {
       req(current_pt(), user_info())
+      refresh_val(refresh_val() + 1)
       
       if (!is.null(input$rx_hot)) {
         rx_meds$df <- rhandsontable::hot_to_r(input$rx_hot)
       }
       
       pt_id <- as.character(current_pt()$id)
-      json_data <- jsonlite::toJSON(rx_meds$df, auto_unbox = TRUE)
+      # Ensure JSON is a single string for the SQL query
+      json_data <- as.character(jsonlite::toJSON(rx_meds$df, auto_unbox = TRUE))
       
       tryCatch({
         dbExecute(pool, glue::glue_sql("
-          INSERT INTO prescriptions (patient_id, meds_json, created_by, created_at, visit_date)
-          VALUES ({pt_id}, {json_data}, {user_info()$username}, NOW(), CURRENT_DATE)
-          ON CONFLICT (patient_id, visit_date) 
-          DO UPDATE SET 
-            meds_json = EXCLUDED.meds_json,
-            created_by = EXCLUDED.created_by,
-            created_at = NOW()
-        ", .con = pool))
+      INSERT INTO prescriptions (patient_id, meds_json, created_by, created_at, visit_date)
+      VALUES ({pt_id}, {json_data}, {user_info()$username}, NOW(), CURRENT_DATE)
+      ON CONFLICT (patient_id, visit_date) 
+      DO UPDATE SET 
+        meds_json = EXCLUDED.meds_json,
+        created_by = EXCLUDED.created_by,
+        created_at = NOW()
+    ", .con = pool))
+        
+        # --- ADDED: Trigger the timeline refresh ---
+        if (exists("timeline_trigger") && is.reactiveVal(timeline_trigger)) {
+          timeline_trigger(timeline_trigger() + 1)
+        }
         
         rx_meta$is_history <- TRUE
         rx_meta$history_date <- as.character(Sys.Date())
-        showNotification("Prescription Saved.", type = "message")
+        showNotification("Prescription Saved Successfully.", type = "message")
+        
       }, error = function(e) {
         showNotification(paste("Save Failed:", e$message), type = "error")
       })

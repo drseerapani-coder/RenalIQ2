@@ -50,95 +50,74 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info) {
     
     output$debug_console <- renderPrint({ cat(debug_logs()) })
     
+    # --- Inside mod_lab_ingestion.R server ---
     observeEvent(input$file_input, {
       req(input$file_input, current_pt())
-      
-      debug_logs(paste0("\n--- New Upload: ", Sys.time(), " ---"))
       files <- input$file_input
       all_results <- list()
       
-      withProgress(message = 'AI Analysis in Progress...', value = 0, {
+      withProgress(message = 'Hybrid Extraction in Progress...', value = 0, {
         for (i in 1:nrow(files)) {
           path <- files$datapath[i]
           
-          tryCatch({
-            # STEP 1: TEXT EXTRACTION & SANITIZATION
-            raw_text <- if(grepl("pdf", files$type[i], ignore.case = TRUE)) {
-              debug_logs(paste0(debug_logs(), "\nReading PDF: ", files$name[i]))
-              txt <- paste(pdftools::pdf_text(path), collapse = "\n\n")
-              iconv(txt, "UTF-8", "ASCII", sub="") # Clean non-ASCII
-            } else {
-              debug_logs(paste0(debug_logs(), "\nOCR Image: ", files$name[i]))
-              tesseract::ocr(path)
-            }
-            
-            # STEP 2: DIRECT HTTR CALL
-            # STEP 2: DIRECT HTTR CALL
-            incProgress(0.5, detail = "Consulting AI...")
-            
-            # STEP 2: REFINED AI REQUEST
-            res <- httr::POST(
-              url = "https://api.openai.com/v1/chat/completions",
-              httr::add_headers(Authorization = paste("Bearer", Sys.getenv("OPENAI_API_KEY"))),
-              httr::content_type_json(),
-              body = list(
-                model = "gpt-4o-mini",
-                messages = list(
-                  # Update the system prompt in mod_lab_ingestion.R
-                  list(role = "system", content = "You are a medical data parser. 
-      Extract data into a JSON array using these EXACT keys:
-      - 'test_name': Use provided list names.
-      - 'num_val': The number ONLY as a decimal (e.g., 23.0).
-      - 'unit': The unit ONLY (e.g., 'mg/dl').
-      - 'test_date': YYYY-MM-DD.
-      If a test is non-numeric (e.g. 'Normal'), put it in 'value_text' and leave 'num_val' null.
-      Return RAW JSON only."),
-                  list(role = "user", content = paste("Target List:", paste(all_test_names, collapse=", "), "\n\nText:", raw_text))
-                ),
-                temperature = 0
+          # [Standard OCR/PDF Text Extraction Step Here]
+          
+          # STEP 2: AI BROAD EXTRACTION
+          res <- httr::POST(
+            url = "https://api.openai.com/v1/chat/completions",
+            httr::add_headers(Authorization = paste("Bearer", Sys.getenv("OPENAI_API_KEY"))),
+            body = list(
+              model = "gpt-4o-mini",
+              messages = list(
+                list(role = "system", content = system_prompt_above),
+                list(role = "user", content = paste("Text:", raw_text))
               ),
-              encode = "json"
-            )
+              temperature = 0
+            ),
+            encode = "json"
+          )
+          
+          # STEP 3: R-BASED REGEX & VALIDATION
+          ai_out <- httr::content(res)$choices[[1]]$message$content
+          clean_json <- gsub("```json|```", "", ai_out) %>% trimws()
+          raw_batch <- jsonlite::fromJSON(clean_json)
+          
+          if (is.data.frame(raw_batch) && nrow(raw_batch) > 0) {
             
-            # STEP 3: HANDLE API FAILURES
-            if (httr::status_code(res) != 200) {
-              err <- httr::content(res, "text")
-              debug_logs(paste0(debug_logs(), "\nAPI ERROR: ", err))
-              next
-            }
-            
-            # STEP 4: PARSE & CLEAN (THE BACKTICK FIX)
-            # STEP 4: ZERO-LOGIC PARSING
-            ai_out <- httr::content(res)$choices[[1]]$message$content
-            clean_json <- gsub("```json|```", "", ai_out) %>% trimws()
-            batch <- jsonlite::fromJSON(clean_json)
-            
-            if (is.data.frame(batch) && nrow(batch) > 0) {
-              # Standardize column names to lowercase just in case
-              names(batch) <- tolower(names(batch))
-              
-              # Join with your CSV limits
-              batch <- batch %>%
-                inner_join(lab_targets, by = "test_name") %>%
-                mutate(
-                  # AI already gave us num_val, so we just use it!
-                  status = case_when(
-                    is.na(num_val) ~ "TEXT",
-                    !is.na(high_limit) & num_val > high_limit ~ "HIGH",
-                    !is.na(low_limit) & num_val < low_limit ~ "LOW",
-                    TRUE ~ "NORMAL"
-                  )
+            # A. Clean strings and handle common synonyms via Regex
+            processed_batch <- raw_batch %>%
+              mutate(
+                # Normalize names: Lowercase, remove special chars
+                clean_name = tolower(raw_name),
+                
+                # REGEX FIX: Redirect "Albumin: Creatinine" to UMACR
+                test_name = case_when(
+                  grepl("albumin.*creatinine|acr", clean_name) ~ "Urine Microalbumin Creatinine Ratio (UMACR)",
+                  grepl("protein.*creatinine|upcr|pcr", clean_name) ~ "Urine Protein Creatinine Ratio (UPCR)",
+                  grepl("albumin", clean_name) & grepl("urine", clean_name) ~ "Urine Albumin",
+                  grepl("creatinine", clean_name) & grepl("urine", clean_name) ~ "Urine Creatinine",
+                  TRUE ~ raw_name # Fallback
                 )
-              
-              all_results[[i]] <- batch
-            }
-          }, error = function(e) {
-            debug_logs(paste0(debug_logs(), "\nProcessing Error: ", e$message))
-          })
+              )
+            
+            # B. Final Validation: Only keep what is in our lab_targets.csv
+            validated_batch <- processed_batch %>%
+              inner_join(lab_targets, by = "test_name") %>%
+              distinct(test_name, test_date, num_val, .keep_all = TRUE) %>%
+              mutate(
+                status = case_when(
+                  is.na(num_val) ~ "TEXT",
+                  !is.na(high_limit) & num_val > high_limit ~ "HIGH",
+                  !is.na(low_limit) & num_val < low_limit ~ "LOW",
+                  TRUE ~ "NORMAL"
+                )
+              )
+            
+            all_results[[i]] <- validated_batch
+          }
         }
         
-        final_df <- bind_rows(all_results)
-        extracted_data(final_df)
+        extracted_data(bind_rows(all_results))
       })
     })
     
