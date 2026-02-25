@@ -157,7 +157,10 @@ clinical_server <- function(id, pool, current_pt, user_info) {
     
     # Render the Save button in the header only when unlocked
     output$save_button_header_ui <- renderUI({
-      if (!is_locked()) {
+      # Ensure is_locked is treated as TRUE if it's missing/empty during transitions
+      locked <- if(is.null(is_locked())) TRUE else is_locked()
+      
+      if (!locked) { 
         actionButton(ns("save_note"), "Save Visit Record", 
                      class = "btn-sm btn-primary shadow-sm", 
                      icon = icon("floppy-disk"))
@@ -203,14 +206,17 @@ clinical_server <- function(id, pool, current_pt, user_info) {
     
     # --- 3. UI LOCKING CONTROL ---
     observe({
-      toggle_state <- !is_locked()
+      # Use isTruthy to prevent the "Missing value where TRUE/FALSE needed" error
+      state <- is_locked()
+      req(!is.null(state)) 
+      
+      toggle_state <- !state
       fields <- c("v_bp", "v_hr", "v_weight", "v_temp", "v_followup", "clinic_notes", "quick_interval")
       
       for (field in fields) {
         shinyjs::toggleState(field, condition = toggle_state)
       }
       
-      shinyjs::toggle("save_note", condition = toggle_state)
       shinyjs::toggle("pmhx_controls", condition = toggle_state)
     })
     
@@ -272,9 +278,22 @@ clinical_server <- function(id, pool, current_pt, user_info) {
             updateTextAreaInput(session, "clinic_notes", value = data$clinic_notes %||% "")
             
             # Handle Follow-up Date (Safety check for nulls)
+            # Handle Follow-up Date safely
             f_date <- data$followup_date
-            if(!is.null(f_date) && nzchar(f_date)) {
-              updateDateInput(session, "v_followup", value = as.Date(f_date))
+            
+            # 1. Ensure it's not NULL and has a value
+            if (shiny::isTruthy(f_date)) {
+              
+              # 2. Extract the first element if it's a list/vector, and convert to character
+              f_date_str <- as.character(unlist(f_date)[1])
+              
+              # 3. Final check: is the resulting string a valid date?
+              tryCatch({
+                updateDateInput(session, "v_followup", value = as.Date(f_date_str))
+              }, error = function(e) {
+                updateDateInput(session, "v_followup", value = NA)
+              })
+              
             } else {
               updateDateInput(session, "v_followup", value = NA)
             }
@@ -375,35 +394,26 @@ clinical_server <- function(id, pool, current_pt, user_info) {
     })
     
     observeEvent(input$del_past_medical_history_row, {
-      # 1. Get current data from the table (not the reactiveVal, to capture unsaved typing)
       df <- if(!is.null(input$past_medical_history_table)) {
         hot_to_r(input$past_medical_history_table)
       } else {
         pmh_data()
       }
       
-      # 2. Capture the selection
       sel <- input$past_medical_history_table_select
       
-      # 3. Robust Deletion Logic
+      # Check for sel$r (which is 0 for the first row)
       if (!is.null(sel) && !is.null(sel$r) && nrow(df) > 0) {
-        # Translate JavaScript 0-index to R 1-index
-        # If the UI sends 0, it means Row 1. So we add 1.
-        row_index <- sel$r 
+        # Convert JS 0-index to R 1-index
+        row_to_del <- as.numeric(sel$r) + 1 
         
-        # Safety check: ensure index is within data frame bounds
-        if(row_index > 0 && row_index <= nrow(df)) {
-          pmh_data(df[-row_index, ])
-          showNotification("Row removed. Click Save to apply to database.", type = "message")
+        if(row_to_del <= nrow(df)) {
+          pmh_data(df[-row_to_del, ])
+          showNotification("Row removed.", type = "message")
         }
-      } else {
-        # FALLBACK: If selection is lost/null, delete the last row
-        if (nrow(df) > 0) {
-          pmh_data(df[-nrow(df), ])
-          showNotification("No row selected. Removed last row by default.", type = "warning")
-        } else {
-          showNotification("Table is already empty.", type = "error")
-        }
+      } else if (nrow(df) > 0) {
+        pmh_data(df[-nrow(df), ])
+        showNotification("Removed last row.", type = "warning")
       }
     })
     
