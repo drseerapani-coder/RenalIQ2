@@ -17,6 +17,7 @@ try(library(RPostgres), silent = TRUE)
 
 # 1. Load Configuration & Helpers
 source("helpers.R")
+source("migrate.R")
 source("auth_module.R") 
 source("mod_registration.R")
 source("mod_clinical.R")
@@ -49,11 +50,19 @@ pool <- tryCatch({
   return(NULL) 
 })
 
-onStop(function() { 
+onStop(function() {
   if (!is.null(pool) && inherits(pool, "Pool")) {
-    poolClose(pool) 
+    poolClose(pool)
   }
 })
+
+# 3. Run database migrations on startup
+if (!is.null(pool)) {
+  tryCatch(
+    run_migrations(pool),
+    error = function(e) message("Startup migration error: ", e$message)
+  )
+}
 
 # 2. FAIL-SAFE OPENAI KEY
 openai_key <- Sys.getenv("OPENAI_API_KEY")
