@@ -3,6 +3,47 @@
 mobile_rx_ui <- function(id) {
   ns <- NS(id)
   tagList(
+    tags$style(HTML("
+      /* High-Contrast Card Styling */
+      .rx-card { 
+        transition: all 0.2s; border-left: 5px solid #f39c12; background: #fff;
+        border-radius: 8px !important; margin-bottom: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+      }
+      .rx-card.selected { border-left: 5px solid #2c3e50; background-color: #fff9f0 !important; }
+      .rx-brand-name { font-size: 1.15rem; font-weight: 800; color: #1a252f; text-transform: uppercase; }
+      .rx-generic-name { font-size: 0.85rem; color: #e67e22; font-weight: 600; font-style: italic; margin-bottom: 4px; }
+      .rx-badge { 
+        font-weight: 700; font-size: 0.7rem; padding: 4px 8px; border-radius: 4px; 
+        background: #fff; border: 1px solid #f39c12; color: #2c3e50; margin-right: 4px; display: inline-block;
+      }
+      
+      /* Grid for 1-12 buttons - 6 columns wide */
+      /* Change within tags$style */
+     .stitch-grid { 
+  display: grid; 
+  grid-template-columns: repeat(6, 1fr); 
+  gap: 10px; /* Increased from 4px to 10px */
+  margin-bottom: 12px; 
+  flex-grow: 1; 
+}
+
+.btn-stitch { 
+  height: 48px; /* Increased height */
+  min-width: 42px; 
+  font-weight: 800; 
+  border-radius: 6px; 
+  padding: 5px; 
+  display: flex; 
+  align-items: center; 
+  justify-content: center; 
+}
+      .override-row { 
+        background: #fef5e7; padding: 10px; border-radius: 0 0 8px 8px; 
+        border-top: 1px dashed #f39c12; margin-top: 5px;
+      }
+      .ampm-col { display: flex; flex-direction: column; gap: 4px; min-width: 55px; }
+      .label-mini { font-size: 0.75rem; font-weight: bold; color: #7f8c8d; display: block; margin-bottom: 2px; }
+    ")),
     uiOutput(ns("rx_main_container"))
   )
 }
@@ -11,264 +52,195 @@ mobile_rx_server <- function(id, pool, current_pt, user_info) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     
-    # --- Local Reactive State ---
+    # --- State ---
     rx_master <- reactiveVal(data.frame())
-    
-    empty_rx_df <- function() {
-      data.frame(
-        brand_name = character(), generic = character(), dose = character(), 
-        freq = character(), route = character(), duration = character(),
-        stringsAsFactors = FALSE
-      )
-    }
-    
-    rx_meds <- reactiveValues(df = empty_rx_df())
+    rx_meds <- reactiveValues(
+      df = data.frame(brand_name=character(), generic=character(), dose=character(), 
+                      freq=character(), route=character(), duration=character(),
+                      stringsAsFactors=FALSE),
+      selected_idx = NULL, s_cat = "OD", s_num = "8", s_ampm = "AM"
+    )
     rx_meta <- reactiveValues(is_history = FALSE, history_date = NULL)
     
-    # --- Load Drug Library ---
+    clean_df <- function(df) {
+      if (is.null(df) || nrow(df) == 0) {
+        return(data.frame(brand_name=character(), generic=character(), dose=character(), 
+                          freq=character(), route=character(), duration=character(),
+                          stringsAsFactors=FALSE))
+      }
+      df[] <- lapply(df, function(x) { x[is.na(x)] <- ""; as.character(x) })
+      return(as.data.frame(df))
+    }
+    
+    # --- Database Operations ---
     load_rx_master <- function() { 
       req(pool)
-      tryCatch({
-        data <- dbGetQuery(pool, "SELECT * FROM drug_master ORDER BY brand_name ASC")
-        rx_master(data)
-      }, error = function(e) message("Error loading drug master: ", e$message))
+      data <- dbGetQuery(pool, "SELECT * FROM drug_master ORDER BY brand_name ASC")
+      if("id" %in% names(data)) data$id <- as.character(data$id)
+      rx_master(clean_df(data))
     }
-    
     observe({ load_rx_master() })
-    rx_search_val <- reactive({ input$rx_q }) %>% debounce(300)
     
-    # --- Function to fetch the Last Prescription ---
-    load_rx_history <- function(pt_id) {
-      req(pt_id, pool)
-      print(paste("Attempting to load Rx for ID:", pt_id, "Type:", class(pt_id)))
-      
-      tryCatch({
-        res <- dbGetQuery(pool, 
-                          "SELECT meds_json, visit_date FROM prescriptions 
-                          WHERE TRIM(patient_id::text) = TRIM($1::text) 
-                          ORDER BY visit_date DESC LIMIT 1", 
-                          list(as.character(pt_id)))
-        
-        if (nrow(res) > 0) {
-          # DATE SAFETY: Prevent coercion errors
-          raw_date <- res$visit_date[1]
-          clean_date <- tryCatch({
-            as.character(as.Date(raw_date)) 
-          }, error = function(e) "Unknown Date")
-          
-          json_content <- res$meds_json[1]
-          is_valid_string <- !is.na(json_content) && nchar(trimws(json_content)) > 2
-          
-          if (is_valid_string) {
-            raw_data <- tryCatch(jsonlite::fromJSON(json_content), error = function(e) NULL)
-            
-            if (!is.null(raw_data)) {
-              rx_meta$is_history <- TRUE
-              rx_meta$history_date <- clean_date
-              
-              df <- if (!is.data.frame(raw_data)) as.data.frame(raw_data) else raw_data
-              if ("brand" %in% names(df)) names(df)[names(df) == "brand"] <- "brand_name"
-              
-              required_cols <- c("brand_name", "generic", "dose", "freq", "route", "duration")
-              for (col in required_cols) { if (!(col %in% names(df))) df[[col]] <- "" }
-              
-              rx_meds$df <- df[, required_cols, drop = FALSE]
-            } else {
-              rx_meds$df <- empty_rx_df()
-              rx_meta$is_history <- FALSE
-            }
-          }
-        } else {
-          rx_meta$is_history <- FALSE
-          rx_meta$history_date <- NULL
-          rx_meds$df <- empty_rx_df()
-        }
-      }, error = function(e) {
-        message("Database Error: ", e$message)
-        rx_meds$df <- empty_rx_df()
-      })
-    }
-    
-    observeEvent(current_pt(), {
-      req(current_pt()$id)
-      load_rx_history(current_pt()$id)
-    }, priority = 10)
-    
-    observeEvent(input$rx_hot, {
-      # Sync table edits back to reactive state
-      rx_meds$df <- rhandsontable::hot_to_r(input$rx_hot)
-    })
-    
-    # --- Main UI Container ---
-    output$rx_main_container <- renderUI({
-      req(current_pt())
-      card(
-        card_header(
-          div(class="d-flex justify-content-between align-items-center",
-              span(icon("prescription"), " Medication Builder"),
-              if(rx_meta$is_history) span(class="badge bg-info", paste("Loaded:", rx_meta$history_date))
-          )
-        ),
-        card_body(
-          textInput(ns("rx_q"), "Search & Add Drug", placeholder = "Start typing..."),
-          uiOutput(ns("rx_search_results")),
-          hr(),
-          
-          tags$label(strong("Prescription Summary")),
-          uiOutput(ns("rx_list")), 
-          
-          hr(),
-          
-          tags$label(strong("Edit Details (Table View)")),
-          rHandsontableOutput(ns("rx_hot"))
-        ),
-        card_footer(
-          actionButton(ns("save_rx"), "Save Prescription", class="btn-success w-100 btn-lg")
-        )
-      )
-    })
-    
-    # --- Search Results UI ---
-    output$rx_search_results <- renderUI({
-      term <- rx_search_val(); req(term); req(nchar(term) >= 2)
-      matches <- rx_master() %>% 
-        filter(grepl(term, brand_name, ignore.case=T) | grepl(term, generic, ignore.case=T)) %>% 
-        head(5)
-      
-      if(nrow(matches) == 0) return(actionButton(ns("new_drug_modal"), "Add New to Library", class="btn-sm btn-warning w-100"))
-      
-      lapply(1:nrow(matches), function(i) {
-        d <- matches[i, ]
-        div(style = "border: 1px solid #eee; border-radius: 8px; padding: 12px; margin-bottom: 8px; cursor: pointer; background: white;",
-            onclick = sprintf("Shiny.setInputValue('%s', %d, {priority:'event'})", ns("add_rx_id"), d$id),
-            div(strong(d$brand_name), tags$small(style="color:#666;", paste0(" (", d$generic, ")"))),
-            div(style = "font-size: 0.8rem; color: #0d6efd; margin-top: 4px; display: flex; gap: 8px; flex-wrap: wrap;",
-                span(icon("pills"), d$dose),
-                span(icon("clock"), d$freq),
-                span(icon("route"), d$route),
-                span(icon("calendar-day"), d$duration)
-            )
-        )
-      })
-    })
-    
-    # --- Card Summary UI ---
-    output$rx_list <- renderUI({
-      df <- rx_meds$df
-      if(nrow(df) == 0) return(div(class="text-center text-muted p-3 border rounded bg-light", "No medications added."))
-      
-      lapply(1:nrow(df), function(i) {
-        div(class="p-3 mb-2 border rounded shadow-sm bg-white",
-            div(class="d-flex justify-content-between align-items-start",
-                div(
-                  div(strong(df$brand_name[i]), span(class="text-muted", style="font-size:0.8rem;", paste0(" (", df$generic[i], ")"))),
-                  div(style="font-size: 0.85rem; margin-top: 8px;",
-                      span(class="badge bg-primary-subtle text-primary border me-1", icon("pills"), df$dose[i]),
-                      span(class="badge bg-info-subtle text-info border me-1", icon("clock"), df$freq[i]),
-                      span(class="badge bg-success-subtle text-success border me-1", icon("route"), df$route[i]),
-                      span(class="badge bg-warning-subtle text-warning border", icon("calendar-day"), df$duration[i])
-                  )
-                ),
-                actionButton(ns(paste0("del_", i)), NULL, icon("trash"), 
-                             class="btn-outline-danger btn-sm border-0",
-                             onclick = sprintf("Shiny.setInputValue('%s', %d, {priority: 'event'})", ns("del_rx_idx"), i))
-            )
-        )
-      })
-    })
-    
-    # --- RHandsontable Logic ---
-    output$rx_hot <- renderRHandsontable({
-      df_to_show <- rx_meds$df
-      req(nrow(df_to_show) >= 0)
-      
-      rhandsontable(df_to_show, 
-                    stretchH = "all", 
-                    rowHeaders = FALSE, 
-                    width = "100%", 
-                    manualColumnResize = TRUE) %>%
-        hot_table(highlightCol = TRUE, highlightRow = TRUE)
-    })
-    
-    # --- Event Handlers ---
-    observeEvent(input$add_rx_id, {
-      new_d <- rx_master() %>% filter(id == input$add_rx_id) %>% 
-        select(brand_name, generic, dose, freq, route, duration)
-      rx_meds$df <- rbind(rx_meds$df, new_d)
-      updateTextInput(session, "rx_q", value = "")
-    })
-    
-    observeEvent(input$del_rx_idx, {
-      rx_meds$df <- rx_meds$df[-as.numeric(input$del_rx_idx), ]
-    })
-    
-    refresh_val <- reactiveVal(0)
-    
-    observeEvent(input$save_rx, {
-      req(current_pt(), user_info())
-      refresh_val(refresh_val() + 1)
-      
-      if (!is.null(input$rx_hot)) {
-        rx_meds$df <- rhandsontable::hot_to_r(input$rx_hot)
-      }
-      
-      pt_id <- as.character(current_pt()$id)
-      # Ensure JSON is a single string for the SQL query
-      json_data <- as.character(jsonlite::toJSON(rx_meds$df, auto_unbox = TRUE))
-      
-      tryCatch({
-        dbExecute(pool, glue::glue_sql("
-      INSERT INTO prescriptions (patient_id, meds_json, created_by, created_at, visit_date)
-      VALUES ({pt_id}, {json_data}, {user_info()$username}, NOW(), CURRENT_DATE)
-      ON CONFLICT (patient_id, visit_date) 
-      DO UPDATE SET 
-        meds_json = EXCLUDED.meds_json,
-        created_by = EXCLUDED.created_by,
-        created_at = NOW()
-    ", .con = pool))
-        
-        # --- ADDED: Trigger the timeline refresh ---
-        if (exists("timeline_trigger") && is.reactiveVal(timeline_trigger)) {
-          timeline_trigger(timeline_trigger() + 1)
-        }
-        
-        rx_meta$is_history <- TRUE
-        rx_meta$history_date <- as.character(Sys.Date())
-        showNotification("Prescription Saved Successfully.", type = "message")
-        
-      }, error = function(e) {
-        showNotification(paste("Save Failed:", e$message), type = "error")
-      })
-    })
-    
-    # --- Register New Drug Modal ---
-    observeEvent(input$new_drug_modal, {
+    observeEvent(input$add_custom_drug, {
       showModal(modalDialog(
-        title = "Register New Medication",
-        textInput(ns("n_brand"), "Brand Name", value = input$rx_q),
-        textInput(ns("n_generic"), "Generic Name"),
-        fluidRow(
-          column(6, textInput(ns("n_dose"), "Dose")),
-          column(6, textInput(ns("n_freq"), "Frequency"))
+        title = tags$h4(style="color:#e67e22;", icon("database"), " Add Drug to Master List"),
+        div(class="row g-2",
+            div(class="col-12", textInput(ns("new_brand"), "Brand Name", value = input$rx_q)),
+            div(class="col-12", textInput(ns("new_generic"), "Generic Name")),
+            div(class="col-6", textInput(ns("new_dose"), "Dose", value = "1 TAB")),
+            div(class="col-6", textInput(ns("new_freq"), "Freq", value = "OD8")),
+            div(class="col-12", textInput(ns("new_dur"), "Duration", value = "Until next visit"))
         ),
-        textInput(ns("n_route"), "Route", value = "Oral"),
-        textInput(ns("n_dur"), "Duration"),
         footer = tagList(
-          modalButton("Cancel"), 
-          actionButton(ns("save_new_drug_lib"), "Save to Library", class="btn-primary")
-        )
+          modalButton("Cancel"),
+          actionButton(ns("save_new_to_db"), "Save to Master", class="btn-warning fw-bold")
+        ), size = "m", easyClose = TRUE
       ))
     })
     
-    observeEvent(input$save_new_drug_lib, {
-      req(input$n_brand, pool)
-      dbExecute(pool, 
-                "INSERT INTO drug_master (brand_name, generic, dose, freq, route, duration) 
-                 VALUES ($1, $2, $3, $4, $5, $6)",
-                list(input$n_brand, input$n_generic, input$n_dose, input$n_freq, input$n_route, input$n_dur))
+    observeEvent(input$save_new_to_db, {
+      req(input$new_brand)
+      dbExecute(pool, "INSERT INTO drug_master (brand_name, generic, dose, freq, route, duration) VALUES ($1, $2, $3, $4, $5, $6)", 
+                list(input$new_brand, input$new_generic, input$new_dose, input$new_freq, "Oral", input$new_dur))
       load_rx_master()
+      new_row <- data.frame(brand_name=input$new_brand, generic=input$new_generic, dose=input$new_dose, 
+                            freq=input$new_freq, route="Oral", duration=input$new_dur, stringsAsFactors=FALSE)
+      rx_meds$df <- clean_df(rbind(rx_meds$df, new_row))
+      rx_meds$selected_idx <- nrow(rx_meds$df)
       removeModal()
-      showNotification("Drug Added to Library.")
+      updateTextInput(session, "rx_q", value="")
+    })
+    
+    # --- Live Input Sync ---
+    observe({
+      req(rx_meds$selected_idx)
+      idx <- as.numeric(rx_meds$selected_idx)
+      if (!is.null(input$ov_dose)) rx_meds$df$dose[idx] <- input$ov_dose
+      if (!is.null(input$ov_route)) rx_meds$df$route[idx] <- input$ov_route
+      if (!is.null(input$ov_dur)) rx_meds$df$duration[idx] <- input$ov_dur
+      if (!is.null(input$ov_freq) && input$ov_freq != "") {
+        rx_meds$df$freq[idx] <- input$ov_freq
+      } else if (rx_meds$s_cat %in% c("OD", "BD")) {
+        num <- as.numeric(rx_meds$s_num)
+        hr <- if(rx_meds$s_ampm == "PM" && num < 12) num + 12 else if(rx_meds$s_ampm == "AM" && num == 12) 24 else num
+        rx_meds$df$freq[idx] <- paste0(rx_meds$s_cat, hr)
+      }
+    })
+    
+    # --- UI Logic Builders ---
+    render_quick_edit <- function() {
+      idx <- as.numeric(rx_meds$selected_idx)
+      curr <- rx_meds$df[idx, ]
+      div(class="card border-warning mb-2",
+          div(class="card-header bg-warning py-1 d-flex justify-content-between",
+              tags$strong("Set Frequency"),
+              actionButton(ns("close_edit"), "Done", class="btn btn-xs btn-dark")),
+          div(class="card-body p-2",
+              div(class="d-flex flex-wrap gap-1 mb-2",
+                  lapply(c("OD", "BD", "TDS/QID", "Days", "Misc"), function(cat) {
+                    actionButton(ns(paste0("scat_", cat)), cat, 
+                                 class = if(rx_meds$s_cat == cat) "btn btn-xs btn-dark" else "btn btn-xs btn-outline-warning", 
+                                 onclick = sprintf("Shiny.setInputValue('%s', '%s')", ns("change_cat"), cat))
+                  })),
+              div(class="p-2 border rounded bg-white",
+                  if(rx_meds$s_cat %in% c("OD", "BD")) {
+                    div(class="d-flex gap-2",
+                        div(class="stitch-grid", lapply(1:12, function(n) {
+                          actionButton(ns(paste0("sn_", n)), as.character(n), 
+                                       class = paste("btn btn-stitch", if(rx_meds$s_num == as.character(n)) "btn-warning" else "btn-outline-warning"), 
+                                       onclick = sprintf("Shiny.setInputValue('%s', '%s')", ns("change_num"), n))
+                        })),
+                        div(class="ampm-col",
+                            actionButton(ns("s_am"), "AM", class=if(rx_meds$s_ampm=="AM") "btn btn-xs btn-dark" else "btn btn-xs btn-outline-dark", onclick=sprintf("Shiny.setInputValue('%s','AM')", ns("change_ampm"))),
+                            actionButton(ns("s_pm"), "PM", class=if(rx_meds$s_ampm=="PM") "btn btn-xs btn-dark" else "btn btn-xs btn-outline-dark", onclick=sprintf("Shiny.setInputValue('%s','PM')", ns("change_ampm"))))
+                    )
+                  } else {
+                    codes <- switch(rx_meds$s_cat, "TDS/QID"=c("TDS","QID","PRN","STAT"), "Days"=c("MWF","TTS","Mon","Fri"), "Misc"=c("ALT","Weekly","RTX"))
+                    div(class="d-flex flex-wrap gap-1", lapply(codes, function(c) {
+                      actionButton(ns(paste0("fc_", c)), c, class="btn btn-sm btn-outline-warning", onclick=sprintf("Shiny.setInputValue('%s','%s')", ns("direct_freq"), c))
+                    }))
+                  })),
+          div(class="override-row",
+              div(class="row g-1",
+                  div(class="col-3", span(class="label-mini", "Dose"), textInput(ns("ov_dose"), NULL, value=curr$dose)),
+                  div(class="col-3", span(class="label-mini", "Freq"), textInput(ns("ov_freq"), NULL, value=curr$freq)),
+                  div(class="col-3", span(class="label-mini", "Route"), textInput(ns("ov_route"), NULL, value=curr$route)),
+                  div(class="col-3", span(class="label-mini", "Dur"), textInput(ns("ov_dur"), NULL, value=curr$duration))
+              )
+          ))
+    }
+    
+    # --- Observers ---
+    observeEvent(input$change_cat, { rx_meds$s_cat <- input$change_cat })
+    observeEvent(input$change_num, { rx_meds$s_num <- input$change_num })
+    observeEvent(input$change_ampm, { rx_meds$s_ampm <- input$change_ampm })
+    observeEvent(input$direct_freq, { updateTextInput(session, "ov_freq", value=""); rx_meds$df$freq[rx_meds$selected_idx] <- input$direct_freq })
+    observeEvent(input$close_edit, { rx_meds$selected_idx <- NULL })
+    observeEvent(input$select_rx_card, { rx_meds$selected_idx <- input$select_rx_card })
+    observeEvent(input$del_rx_idx, { rx_meds$df <- rx_meds$df[-input$del_rx_idx, ]; rx_meds$selected_idx <- NULL })
+    
+    # --- Rendering ---
+    output$rx_search_results <- renderUI({
+      req(input$rx_q); if(nchar(input$rx_q) < 2) return(NULL)
+      matches <- rx_master() %>% filter(grepl(input$rx_q, brand_name, ignore.case=TRUE)) %>% head(5)
+      if(nrow(matches) == 0) return(actionButton(ns("add_custom_drug"), paste("Add New:", input$rx_q), class="btn btn-sm btn-warning w-100 mt-2"))
+      lapply(1:nrow(matches), function(i) {
+        d <- matches[i,]
+        actionButton(ns(paste0("ab_", i)), HTML(paste0("<b>", d$brand_name, "</b> <small>(", d$dose, ")</small>")), 
+                     class="btn btn-sm btn-outline-secondary w-100 mb-1 text-start", 
+                     onclick = sprintf("Shiny.setInputValue('%s', '%s')", ns("add_rx_id"), d$id))
+      })
+    })
+    
+    observeEvent(input$add_rx_id, {
+      lib <- rx_master() %>% filter(id == input$add_rx_id)
+      row <- data.frame(brand_name=lib$brand_name[1], generic=lib$generic[1], dose=lib$dose[1], 
+                        freq=lib$freq[1], route="Oral", duration=lib$duration[1], stringsAsFactors=FALSE)
+      rx_meds$df <- clean_df(rbind(rx_meds$df, row))
+      rx_meds$selected_idx <- nrow(rx_meds$df); updateTextInput(session, "rx_q", value="")
+    })
+    
+    output$rx_list <- renderUI({
+      df <- rx_meds$df; if(nrow(df) == 0) return(NULL)
+      lapply(1:nrow(df), function(i) {
+        sel <- !is.null(rx_meds$selected_idx) && rx_meds$selected_idx == i
+        tagList(
+          div(class = paste("rx-card p-3", if(sel) "selected"), onclick = sprintf("Shiny.setInputValue('%s', %d)", ns("select_rx_card"), i),
+              div(class="d-flex justify-content-between align-items-start",
+                  div(span(class="rx-brand-name", df$brand_name[i]), div(class="rx-generic-name", df$generic[i]),
+                      div(class="mt-1", 
+                          span(class="rx-badge", icon("pills"), df$dose[i]), # Added Dose
+                          span(class="rx-badge", icon("clock"), df$freq[i]), 
+                          span(class="rx-badge", icon("map-marker-alt"), df$route[i]))),
+                  actionButton(ns(paste0("del_", i)), NULL, icon("trash"), class="btn btn-sm btn-outline-danger border-0", 
+                               onclick = sprintf("event.stopPropagation(); Shiny.setInputValue('%s', %d)", ns("del_rx_idx"), i)))),
+          if(sel) render_quick_edit())
+      })
+    })
+    
+    output$rx_main_container <- renderUI({
+      req(current_pt())
+      div(div(class="bg-dark text-white p-2 d-flex justify-content-between", span(icon("file-medical"), " PRESCRIPTION"), if(rx_meta$is_history) span(class="badge bg-warning text-dark", rx_meta$history_date)),
+          div(class="p-2", textInput(ns("rx_q"), NULL, placeholder = "Search..."), uiOutput(ns("rx_search_results")), hr(class="my-2"), uiOutput(ns("rx_list")),
+              actionButton(ns("save_rx"), "SAVE & CLOSE", class="btn-warning w-100 fw-bold mt-2")))
+    })
+    
+    # --- Persistence ---
+    observeEvent(current_pt(), {
+      req(current_pt()$id, pool)
+      res <- dbGetQuery(pool, "SELECT meds_json, visit_date FROM prescriptions WHERE patient_id::text = $1::text ORDER BY visit_date DESC LIMIT 1", list(as.character(current_pt()$id)))
+      if (nrow(res) > 0) {
+        rx_meta$history_date <- format(as.Date(res$visit_date[1]), "%Y-%m-%d"); rx_meta$is_history <- TRUE
+        rx_meds$df <- clean_df(as.data.frame(jsonlite::fromJSON(res$meds_json[1])))
+      } else { rx_meta$is_history <- FALSE; rx_meds$df <- rx_meds$df[0,] }
+    })
+    
+    observeEvent(input$save_rx, {
+      req(current_pt())
+      json_data <- as.character(jsonlite::toJSON(rx_meds$df, auto_unbox = TRUE))
+      dbExecute(pool, "INSERT INTO prescriptions (patient_id, meds_json, visit_date) VALUES ($1, $2, $3) ON CONFLICT (patient_id, visit_date) DO UPDATE SET meds_json = EXCLUDED.meds_json", 
+                list(as.character(current_pt()$id), json_data, Sys.Date()))
+      showNotification("Saved")
     })
   })
 }
