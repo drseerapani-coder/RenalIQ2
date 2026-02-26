@@ -171,7 +171,7 @@ server <- function(input, output, session) {
     registration_server("reg_mod", pool, current_pt, auth$user_info)
     clinical_server("clin_mod", pool, current_pt, auth$user_info)
     lab_flowsheet_server("lab_mod", pool, current_pt, lab_targets_raw, reactive(input$main_nav), auth$user_info)
-    lab_ingestion_server("lab_ingest_mod", pool, current_pt, auth$user_info,lab_targets)
+    lab_ingestion_server("lab_ingest_mod", pool, current_pt, auth$user_info,lab_targets= lab_targets_raw)
     mobile_rx_server("rx_mod", pool, current_pt, auth$user_info)
     timeline_server("pt_timeline", pool, current_pt, refresh_trigger = reactive(refresh_val()))
     user_management_server("user_mgmt", pool)
