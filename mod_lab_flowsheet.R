@@ -190,71 +190,75 @@ lab_flowsheet_server <- function(id, pool, current_pt, lab_targets_raw,parent_na
     # ---------------------------------------------------------
     observeEvent(input$save_flowsheet, {
       req(current_pt(), user_info(), input$history_table)
-      
+
       curr_user <- user_info()$username
-      pt_id <- as.character(current_pt()$id)
-      
-      # 1. Convert rhandsontable back to R dataframe
+      pt_id     <- as.integer(current_pt()$id)
+
+      # 1. Convert rhandsontable back to R dataframe.
       df <- hot_to_r(input$history_table)
-      
-      # 2. Reshape data back to long format 
-      # FIX: Changed 'Test' to 'Parameter' to match your renderRHandsontable rename
+
+      # 2. Reshape to long format.
+      #    hot_to_r() uses data.frame() internally, which applies make.names() to
+      #    column names: "25-Feb-26" becomes "X25.Feb.26" (digit-leading names get
+      #    an "X" prefix; hyphens become dots). Reverse that here before parsing.
       df_long <- df %>%
         pivot_longer(
-          cols = -Parameter, 
-          names_to = "test_date_str", 
+          cols      = -Parameter,
+          names_to  = "test_date_str",
           values_to = "num_val"
         ) %>%
+        mutate(
+          test_date_str = gsub("\\.", "-", sub("^X", "", test_date_str)),
+          num_val       = suppressWarnings(as.numeric(num_val))
+        ) %>%
         filter(!is.na(num_val))
-      
+
+      if (nrow(df_long) == 0) {
+        showNotification("No numeric values to save.", type = "warning")
+        return()
+      }
+
       con <- poolCheckout(pool)
       on.exit(poolReturn(con))
-      
+
       tryCatch({
         DBI::dbExecute(con, "BEGIN")
-        
-        log_audit(con, curr_user, "BULK_UPDATE_START", "labs", pt_id)
-        
+
+        log_audit(con, curr_user, "BULK_UPDATE_START", "labs", as.character(pt_id))
+
         for (i in seq_len(nrow(df_long))) {
-          # FIX: Convert the "dd-Mon-yy" column header back to "YYYY-MM-DD" for Postgres
           clean_date <- as.Date(df_long$test_date_str[i], format = "%d-%b-%y")
-          
+
+          # UPSERT so that cells typed into previously-empty rows are also saved,
+          # not just cells that already have a matching row in the database.
           DBI::dbExecute(con, "
-            UPDATE labs 
-            SET num_val = $1, updated_by = $2, updated_at = NOW() 
-            WHERE patient_id = $3 AND test_name = $4 AND test_date = $5",
-                         list(
-                           as.numeric(df_long$num_val[i]), 
-                           curr_user, 
-                           pt_id, 
-                           df_long$Parameter[i], 
-                           as.character(clean_date)
-                         )
+            INSERT INTO labs (patient_id, test_date, test_name, num_val, created_by)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (patient_id, test_date, test_name)
+            DO UPDATE SET
+              num_val    = EXCLUDED.num_val,
+              updated_by = $5,
+              updated_at = NOW()",
+            list(
+              pt_id,
+              as.character(clean_date),
+              df_long$Parameter[i],
+              df_long$num_val[i],
+              curr_user
+            )
           )
         }
-        
-        log_audit(con, curr_user, "BULK_UPDATE_COMPLETE", "labs", pt_id)
+
+        log_audit(con, curr_user, "BULK_UPDATE_COMPLETE", "labs", as.character(pt_id))
         DBI::dbExecute(con, "COMMIT")
-        
-        showNotification("All lab changes saved and logged.", type = "message")
-        refresh_trigger(refresh_trigger() + 1) # Refresh to sync UI with DB
-        
+
+        showNotification("All lab changes saved.", type = "message")
+        refresh_trigger(refresh_trigger() + 1)
+
       }, error = function(e) {
         DBI::dbExecute(con, "ROLLBACK")
         showNotification(paste("Flowsheet Save Error:", e$message), type = "error")
       })
-    })
-    
-    output$lab_hot_table <- renderRHandsontable({
-      df <- lab_data()
-      req(df)
-      
-      rhandsontable(df, 
-                    useTypes = FALSE, # This stops the 'column add/delete' warning
-                    stretchH = "all",
-                    rowHeaders = NULL) %>%
-        hot_col("Parameter", width = 200, readOnly = TRUE, type = "text") %>%
-        hot_context_menu(allowRowEdit = FALSE, allowColEdit = FALSE) # Better for mobile
     })
     
     # ---------------------------------------------------------
