@@ -43,7 +43,14 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     
+    if (is.null(lab_targets) || nrow(lab_targets) == 0) {
+      message("Critical Error: lab_targets is empty in Lab Ingestion Module")
+      return(NULL)
+    }
     
+    # Generate the prompt inside the module server
+    all_test_names <- lab_targets$test_name
+      
     extracted_data <- reactiveVal(data.frame())
     debug_logs     <- reactiveVal("System Ready. Waiting for upload...")
     

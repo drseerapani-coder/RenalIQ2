@@ -28,6 +28,7 @@ source("clinical_summary.R")
 
 # Load static data - Wrapped in try to prevent crash if file read fails
 lab_targets_raw <- read.csv("lab_targets.csv", stringsAsFactors = FALSE)
+lab_targets <- lab_targets_raw
 lab_config <- split(lab_targets_raw$test_name, lab_targets_raw$category)
 
 # 2. Database Connection Logic
