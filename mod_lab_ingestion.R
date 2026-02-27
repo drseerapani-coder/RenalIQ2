@@ -43,6 +43,7 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     
+    
     extracted_data <- reactiveVal(data.frame())
     debug_logs     <- reactiveVal("System Ready. Waiting for upload...")
     
