@@ -178,59 +178,51 @@ registration_server <- function(id, pool, current_pt_out, user_info) {
       pt_state$view_mode <- "editor"
     })
     
-    # 7. Database Save Logic (Adapted to bypass .with_conn scope issue)
-    observeEvent(input$save_patient, {
-      # 1. Validation: Ensure required data is present
-      req(input$pt_first_name, input$pt_dob)
-      
-      # 2. Date Safety: Coerce the input to a character string explicitly for SQL
-      # This avoids the "Couldn't coerce value" warning
-      clean_dob <- as.character(input$pt_dob)
-      
-      # 3. Determine if this is an Update or New Entry
-      pid <- if (!is.null(current_pt())) current_pt()$id else NULL
-      
+    # 7. Database Save Logic
+    observeEvent(input$save_pt, {
+      req(input$first_name, input$dob)
+
+      clean_dob <- as.character(input$dob)
+      pid       <- selected_pt()$id  # NULL for new patients
+
       tryCatch({
-        # Use poolCheckout for transaction stability if needed, 
-        # but dbExecute on the pool is fine for simple single queries.
-        
         if (!is.null(pid)) {
           # --- UPDATE EXISTING PATIENT ---
-          dbExecute(pool, 
-                    "UPDATE patients 
-                 SET first_name = $1, last_name = $2, dob = $3, gender = $4, phone = $5
-                 WHERE id = $6",
-                    list(input$pt_first_name, input$pt_last_name, clean_dob, 
-                         input$pt_gender, input$pt_phone, pid)
+          DBI::dbExecute(pool,
+            "UPDATE registrations
+             SET first_name = $1, last_name = $2, dob = $3, gender = $4,
+                 phone = $5, address1 = $6, allergies = $7, comments = $8,
+                 hospital_number = $9, updated_at = NOW()
+             WHERE id = $10",
+            list(input$first_name, input$last_name, clean_dob, input$gender,
+                 input$phone, input$address1, input$allergies, input$comments,
+                 input$hospital_number, as.integer(pid))
           )
-          showNotification("Patient demographics updated.", type = "message")
+          showNotification("Patient record updated.", type = "message")
         } else {
           # --- INSERT NEW PATIENT ---
-          dbExecute(pool,
-                    "INSERT INTO patients (first_name, last_name, dob, gender, phone) 
-                 VALUES ($1, $2, $3, $4, $5)",
-                    list(input$pt_first_name, input$pt_last_name, clean_dob, 
-                         input$pt_gender, input$pt_phone)
-          )
-          
-          # Fetch the ID of the patient we just created
-          res <- dbGetQuery(pool, "SELECT id FROM patients ORDER BY id DESC LIMIT 1")
-          pid <- res$id
+          pid <- DBI::dbGetQuery(pool,
+            "INSERT INTO registrations
+               (first_name, last_name, dob, gender, phone, address1,
+                allergies, comments, hospital_number, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+             RETURNING id",
+            list(input$first_name, input$last_name, clean_dob, input$gender,
+                 input$phone, input$address1, input$allergies, input$comments,
+                 input$hospital_number)
+          )$id
           showNotification("New patient registered.", type = "message")
         }
-        
-        # --- THE REFRESH ENGINE ---
-        
-        # A. Re-fetch the full row: Ensures 'current_pt' reflects changes immediately
-        updated_pt_row <- dbGetQuery(pool, "SELECT * FROM patients WHERE id = $1", list(pid))
-        current_pt(updated_pt_row)
-        
-        # B. Increment the Trigger: 
-        # This signals the main app to refresh the Timeline/Summary
+
+        # Re-fetch the saved row and update both local and global state
+        updated <- as.list(DBI::dbGetQuery(pool,
+          "SELECT * FROM registrations WHERE id = $1", list(as.integer(pid)))[1, ])
+        selected_pt(updated)
+        current_pt_out(updated)
         save_trigger(save_trigger() + 1)
-        
+
       }, error = function(e) {
-        showNotification(paste("Database Error:", e$message), type = "error")
+        showNotification(paste("Save Error:", e$message), type = "error")
         message("Registration Save Error: ", e$message)
       })
     })
