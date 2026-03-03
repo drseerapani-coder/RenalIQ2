@@ -14,6 +14,7 @@ library(shinycssloaders)
 library(pdftools)
 try(library(sodium), silent = TRUE)
 try(library(RPostgres), silent = TRUE)
+try(library(base64enc), silent = TRUE)
 
 # 1. Load Configuration & Helpers
 source("helpers.R")
@@ -28,7 +29,6 @@ source("clinical_summary.R")
 
 # Load static data - Wrapped in try to prevent crash if file read fails
 lab_targets_raw <- read.csv("lab_targets.csv", stringsAsFactors = FALSE)
-lab_targets <- lab_targets_raw
 lab_config <- split(lab_targets_raw$test_name, lab_targets_raw$category)
 
 # 2. Database Connection Logic
@@ -158,7 +158,10 @@ server <- function(input, output, session) {
     }
   })
 
-  # CRITICAL: Initialize module servers ONLY after login
+  # CRITICAL: Initialize module servers ONLY ONCE after first login.
+  # ignoreInit = TRUE prevents the body running at startup (is_logged = FALSE).
+  # once = TRUE ensures modules are NEVER re-created on a subsequent login —
+  # accumulating duplicate observers was the previous bug.
   observeEvent(auth$is_logged(), {
     req(auth$is_logged())
 
@@ -181,8 +184,11 @@ server <- function(input, output, session) {
     timeline_server("pt_timeline", pool = pool, current_pt = current_pt,
                     refresh_trigger = refresh_val)
 
+    # Return values (daily_selected, followup_selected) reserved for future
+    # cross-module navigation; discarded intentionally for now.
     user_management_server("user_mgmt", pool)
-  })
+
+  }, ignoreInit = TRUE, once = TRUE)
   
   # Debug Logger
   observe({

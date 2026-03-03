@@ -47,16 +47,13 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
       message("Critical Error: lab_targets is empty in Lab Ingestion Module")
       return(NULL)
     }
-    
-    # Generate the prompt inside the module server
-    all_test_names <- lab_targets$test_name
-      
+
     extracted_data <- reactiveVal(data.frame())
     debug_logs     <- reactiveVal("System Ready. Waiting for upload...")
     save_count     <- reactiveVal(0)
-    
+
     output$debug_console <- renderPrint({ cat(debug_logs()) })
-    
+
     # ----------------------------------------------------------
     # Build the AI system prompt once, incorporating all known
     # canonical test names so the model maps to them directly.

@@ -1,13 +1,5 @@
 # mod_mobile_rx.R
-# Helper to handle NULL/NA/Empty strings in one go
-# Vector-safe NULL/NA/Empty helper
-`%||%` <- function(a, b) {
-  if (length(a) > 0 && !is.null(a) && !is.na(a[1]) && as.character(a[1]) != "") {
-    return(as.character(a[1]))
-  } else {
-    return(as.character(b))
-  }
-}
+# %||% is defined in helpers.R (sourced before this file in app.R)
 
 mobile_rx_ui <- function(id) {
   ns <- NS(id)
@@ -70,7 +62,9 @@ mobile_rx_server <- function(id, pool, current_pt, user_info) {
                       stringsAsFactors=FALSE),
       selected_idx = NULL, s_cat = "OD", s_num = "8", s_ampm = "AM"
     )
-    rx_meta <- reactiveValues(is_history = FALSE, history_date = NULL)
+    rx_meta        <- reactiveValues(is_history = FALSE, history_date = NULL)
+    master_edit_id <- reactiveVal(NULL)   # stable ID for the drug currently being edited
+    master_del_id  <- reactiveVal(NULL)   # stable ID for the drug pending deletion
     
     # Update your clean_df function to handle NA specifically
     clean_df <- function(df) {
@@ -135,23 +129,117 @@ mobile_rx_server <- function(id, pool, current_pt, user_info) {
       removeModal()
       updateTextInput(session, "rx_q", value="")
     })
-    
-    # --- Live Input Sync ---
-    # --- Optimized Live Input Sync ---
-    observeEvent(list(input$ov_dose, input$ov_route, input$ov_dur, input$ov_freq), {
-      req(rx_meds$selected_idx)
-      idx <- as.numeric(rx_meds$selected_idx)
-      
-      # Update only if the input is not NULL to avoid clearing data on render
-      if (!is.null(input$ov_dose))  rx_meds$df$dose[idx]     <- input$ov_dose
-      if (!is.null(input$ov_route)) rx_meds$df$route[idx]    <- input$ov_route
-      if (!is.null(input$ov_dur))   rx_meds$df$duration[idx] <- input$ov_dur
-      
-      # Handle Frequency logic
-      if (!is.null(input$ov_freq) && input$ov_freq != "") {
-        rx_meds$df$freq[idx] <- input$ov_freq
-      }
-    }, ignoreInit = TRUE)
+
+    # ---- Master Drug: Edit ----
+    # Capture the drug ID into a stable reactiveVal, then open the pre-filled modal.
+    # We do NOT rely on input$edit_master_id inside save_master_edit because
+    # Shiny.setInputValue inputs may not persist through the modal render cycle.
+    observeEvent(input$edit_master_id, {
+      drug <- rx_master() %>% dplyr::filter(id == input$edit_master_id)
+      req(nrow(drug) > 0)
+      d <- drug[1, ]
+      master_edit_id(d$id)          # lock in the ID before the modal renders
+      showModal(modalDialog(
+        title = tags$h4(style = "color:#e67e22;", icon("pencil-alt"), " Edit Drug in Master List"),
+        div(class = "row g-2",
+            div(class = "col-12", textInput(ns("edit_brand"),   "Brand Name",  value = d$brand_name)),
+            div(class = "col-12", textInput(ns("edit_generic"), "Generic Name", value = d$generic)),
+            div(class = "col-6",  textInput(ns("edit_dose"),    "Dose",         value = d$dose)),
+            div(class = "col-6",  textInput(ns("edit_freq"),    "Freq",         value = d$freq)),
+            div(class = "col-6",  textInput(ns("edit_route"),   "Route",        value = d$route)),
+            div(class = "col-6",  textInput(ns("edit_dur"),     "Duration",     value = d$duration))
+        ),
+        footer = tagList(
+          modalButton("Cancel"),
+          actionButton(ns("save_master_edit"), "Save Changes", class = "btn-warning fw-bold")
+        ),
+        size = "m", easyClose = TRUE
+      ))
+      # Force-populate inputs in case they already exist in Shiny state from a
+      # previous modal open (textInput value= only sets the DOM, not R's state)
+      updateTextInput(session, "edit_brand",   value = d$brand_name)
+      updateTextInput(session, "edit_generic", value = d$generic)
+      updateTextInput(session, "edit_dose",    value = d$dose)
+      updateTextInput(session, "edit_freq",    value = d$freq)
+      updateTextInput(session, "edit_route",   value = d$route)
+      updateTextInput(session, "edit_dur",     value = d$duration)
+    })
+
+    # Persist edits using master_edit_id() — reliably set above
+    observeEvent(input$save_master_edit, {
+      req(master_edit_id(), input$edit_brand)
+      tryCatch({
+        dbExecute(pool,
+                  "UPDATE drug_master
+                      SET brand_name = $1,
+                          generic    = $2,
+                          dose       = $3,
+                          freq       = $4,
+                          route      = $5,
+                          duration   = $6
+                    WHERE id = $7::int",
+                  list(trimws(input$edit_brand),
+                       trimws(input$edit_generic),
+                       trimws(input$edit_dose),
+                       trimws(input$edit_freq),
+                       trimws(input$edit_route),
+                       trimws(input$edit_dur),
+                       as.integer(master_edit_id())))
+        load_rx_master()
+        removeModal()
+        showNotification(paste("Updated:", input$edit_brand), type = "message")
+      }, error = function(e) {
+        showNotification(paste("Error updating drug:", e$message), type = "error")
+      })
+    })
+
+    # ---- Master Drug: Delete ----
+    # Capture the drug ID into a stable reactiveVal, then show confirmation modal.
+    observeEvent(input$del_master_id, {
+      drug <- rx_master() %>% dplyr::filter(id == input$del_master_id)
+      req(nrow(drug) > 0)
+      d <- drug[1, ]
+      master_del_id(d$id)           # lock in the ID before the modal renders
+      showModal(modalDialog(
+        title = tags$h4(style = "color:#c0392b;", icon("exclamation-triangle"), " Delete Drug"),
+        p("Permanently remove ", tags$strong(d$brand_name), " from the master drug list?"),
+        p(class = "text-muted small", "This does not affect any already-saved prescriptions."),
+        footer = tagList(
+          modalButton("Cancel"),
+          actionButton(ns("confirm_master_del"), "Delete Permanently", class = "btn-danger fw-bold")
+        ),
+        easyClose = TRUE
+      ))
+    })
+
+    # Execute delete using master_del_id() — reliably set above
+    observeEvent(input$confirm_master_del, {
+      req(master_del_id())
+      tryCatch({
+        dbExecute(pool, "DELETE FROM drug_master WHERE id = $1::int",
+                  list(as.integer(master_del_id())))
+        load_rx_master()
+        removeModal()
+        showNotification("Drug removed from master list.", type = "warning")
+      }, error = function(e) {
+        showNotification(paste("Error deleting drug:", e$message), type = "error")
+      })
+    })
+
+    # --- Explicit Sync Helper ---
+    # Flushes the edit-panel inputs into rx_meds$df for the given row index.
+    # Called at safe, deterministic points (card switch + Done) instead of a
+    # live observer, which caused cross-contamination: the live observer would
+    # fire with the NEW selected_idx but STALE input values from the old card,
+    # overwriting the new card's data with the previous card's values.
+    sync_edit_to_df <- function(idx) {
+      idx <- as.numeric(idx)
+      if (is.na(idx) || idx < 1 || idx > nrow(rx_meds$df)) return()
+      if (!is.null(input$ov_dose))                         rx_meds$df$dose[idx]     <- input$ov_dose
+      if (!is.null(input$ov_freq) && input$ov_freq != "")  rx_meds$df$freq[idx]     <- input$ov_freq
+      if (!is.null(input$ov_route))                        rx_meds$df$route[idx]    <- input$ov_route
+      if (!is.null(input$ov_dur))                          rx_meds$df$duration[idx] <- input$ov_dur
+    }
     
     # Separate observer for the "Stitch Grid" (OD/BD buttons) 
     # so they don't fight with the manual text input
@@ -181,39 +269,26 @@ mobile_rx_server <- function(id, pool, current_pt, user_info) {
     #   }
     # })
     
-    # 1. Sync Manual Typing TO the Dataframe
-    # --- Robust Unified Data Sync ---
-    # --- Robust Unified Data Sync ---
-    observe({
+    # 2. Sync number grid + AM/PM TO the Text Box (all categories)
+    observeEvent(list(rx_meds$s_num, rx_meds$s_ampm), {
       req(rx_meds$selected_idx)
-      idx <- as.numeric(rx_meds$selected_idx)
-      
-      # Use isolate so this observer ONLY triggers when text inputs change,
-      # NOT when the dataframe itself changes or when a new drug is added.
-      isolate({
-        if (idx > 0 && idx <= nrow(rx_meds$df)) {
-          # Use a debounce-like check: only update if input is NOT null
-          if(!is.null(input$ov_dose))  rx_meds$df$dose[idx]     <- input$ov_dose
-          if(!is.null(input$ov_freq))  rx_meds$df$freq[idx]     <- input$ov_freq
-          if(!is.null(input$ov_route)) rx_meds$df$route[idx]    <- input$ov_route
-          if(!is.null(input$ov_dur))   rx_meds$df$duration[idx] <- input$ov_dur
-        }
-      })
-    })
-    
-    # 2. Sync OD/BD Grid Buttons TO the Text Box
-    observeEvent(list(rx_meds$s_num, rx_meds$s_ampm, rx_meds$s_cat), {
-      req(rx_meds$selected_idx)
-      if (rx_meds$s_cat %in% c("OD", "BD")) {
-        num <- as.numeric(rx_meds$s_num)
-        req(!is.na(num))
-        
-        hr <- if(rx_meds$s_ampm == "PM" && num < 12) num + 12 else if(rx_meds$s_ampm == "AM" && num == 12) 24 else num
-        new_freq <- paste0(rx_meds$s_cat, hr)
-        
-        # This pushes the value into the UI box, which then triggers the observer above
-        updateTextInput(session, "ov_freq", value = new_freq)
-      }
+      num <- as.numeric(rx_meds$s_num)
+      req(!is.na(num))
+
+      hr <- if (rx_meds$s_ampm == "PM" && num < 12) num + 12
+            else if (rx_meds$s_ampm == "AM" && num == 12) 24
+            else num
+
+      # Map each UI category to the freq code prefix used in freq_list.csv
+      prefix <- switch(rx_meds$s_cat,
+        "OD"      = "OD",
+        "BD"      = "BD",
+        "TDS/QID" = "TDS",
+        "Days"    = "OD",   # day-based schedules: grid picks time-of-day
+        "Misc"    = "OD",
+        "OD"
+      )
+      updateTextInput(session, "ov_freq", value = paste0(prefix, hr))
     })
     
     # 3. Sync Fixed Codes (TDS/QID/etc) TO the Text Box
@@ -237,24 +312,38 @@ mobile_rx_server <- function(id, pool, current_pt, user_info) {
                                  onclick = sprintf("Shiny.setInputValue('%s', '%s')", ns("change_cat"), cat))
                   })),
               div(class="p-2 border rounded bg-white",
-                  if(rx_meds$s_cat %in% c("OD","BD")) {
-                    div(class="d-flex gap-2",
-                        div(class="stitch-grid", lapply(1:12, function(n) {
-                          actionButton(ns(paste0("sn_", n)), as.character(n), 
-                                       class = paste("btn btn-stitch", if(rx_meds$s_num == as.character(n)) "btn-warning" else "btn-outline-warning"), 
-                                       onclick = sprintf("Shiny.setInputValue('%s', '%s')", ns("change_num"), n))
-                        })),
-                        div(class="ampm-col",
-                            actionButton(ns("s_am"), "AM", class=if(rx_meds$s_ampm=="AM") "btn btn-xs btn-dark" else "btn btn-xs btn-outline-dark", onclick=sprintf("Shiny.setInputValue('%s','AM')", ns("change_ampm"))),
-                            actionButton(ns("s_pm"), "PM", class=if(rx_meds$s_ampm=="PM") "btn btn-xs btn-dark" else "btn btn-xs btn-outline-dark", onclick=sprintf("Shiny.setInputValue('%s','PM')", ns("change_ampm"))))
+                  # For TDS/QID, Days, Misc: show preset code buttons above the grid
+                  if (!rx_meds$s_cat %in% c("OD", "BD")) {
+                    codes <- switch(rx_meds$s_cat,
+                      "TDS/QID" = c("TDS","QID","PRN","STAT"),
+                      "Days"    = c("MWF","TTS","Mon","Tue","Wed","Thu","Fri","Sat","Sun"),
+                      "Misc"    = c("ALT","Weekly","RTX","hepb")
                     )
-                  } else {
-                    codes <- switch(rx_meds$s_cat, "TDS/QID"=c("TDS","QID","PRN","STAT"), "Days"=c("MWF","TTS","Mon",
-                                                                                                   "Tue","Wed","Thu","Fri","Sat","Sun"), "Misc"=c("ALT","Weekly","RTX","hepb"))
-                    div(class="d-flex flex-wrap gap-1", lapply(codes, function(c) {
-                      actionButton(ns(paste0("fc_", c)), c, class="btn btn-sm btn-outline-warning", onclick=sprintf("Shiny.setInputValue('%s','%s')", ns("direct_freq"), c))
-                    }))
-                  })),
+                    div(class="d-flex flex-wrap gap-1 mb-2",
+                        lapply(codes, function(c) {
+                          actionButton(ns(paste0("fc_", c)), c,
+                                       class   = "btn btn-sm btn-outline-warning",
+                                       onclick = sprintf("Shiny.setInputValue('%s','%s')", ns("direct_freq"), c))
+                        }))
+                  },
+                  # Number grid + AM/PM shown for ALL categories
+                  div(class="d-flex gap-2",
+                      div(class="stitch-grid", lapply(1:12, function(n) {
+                        actionButton(ns(paste0("sn_", n)), as.character(n),
+                                     class   = paste("btn btn-stitch",
+                                                     if (rx_meds$s_num == as.character(n)) "btn-warning" else "btn-outline-warning"),
+                                     onclick = sprintf("Shiny.setInputValue('%s', '%s')", ns("change_num"), n))
+                      })),
+                      div(class="ampm-col",
+                          actionButton(ns("s_am"), "AM",
+                                       class   = if (rx_meds$s_ampm == "AM") "btn btn-xs btn-dark" else "btn btn-xs btn-outline-dark",
+                                       onclick = sprintf("Shiny.setInputValue('%s','AM')", ns("change_ampm"))),
+                          actionButton(ns("s_pm"), "PM",
+                                       class   = if (rx_meds$s_ampm == "PM") "btn btn-xs btn-dark" else "btn btn-xs btn-outline-dark",
+                                       onclick = sprintf("Shiny.setInputValue('%s','PM')", ns("change_ampm")))
+                      )
+                  )
+              )),
           div(class="override-row",
               div(class="row g-1",
                   div(class="col-3", span(class="label-mini", "Dose"), textInput(ns("ov_dose"), NULL, value=curr$dose)),
@@ -283,8 +372,19 @@ mobile_rx_server <- function(id, pool, current_pt, user_info) {
       updateTextInput(session, "ov_freq", value = input$direct_freq)
     })
     
-    observeEvent(input$close_edit, { rx_meds$selected_idx <- NULL })
-    observeEvent(input$select_rx_card, { rx_meds$selected_idx <- input$select_rx_card })
+    # Sync current card's inputs into df BEFORE closing the edit panel (Done button)
+    observeEvent(input$close_edit, {
+      if (!is.null(rx_meds$selected_idx)) sync_edit_to_df(rx_meds$selected_idx)
+      rx_meds$selected_idx <- NULL
+    })
+
+    # Sync PREVIOUS card's inputs into df BEFORE switching selection to the new card.
+    # At the moment this observer fires, selected_idx is still the old card's index
+    # and the input$ov_* values are still the old card's values — safe to flush.
+    observeEvent(input$select_rx_card, {
+      if (!is.null(rx_meds$selected_idx)) sync_edit_to_df(rx_meds$selected_idx)
+      rx_meds$selected_idx <- input$select_rx_card
+    })
     observeEvent(input$del_rx_idx, {
       # 1. Capture the index to delete
       idx_to_remove <- as.numeric(input$del_rx_idx)
@@ -322,22 +422,33 @@ mobile_rx_server <- function(id, pool, current_pt, user_info) {
       
       lapply(1:nrow(matches), function(i) {
         d <- matches[i,]
-        
-        # 2. Fix: Use base R subsetting instead of the 'filter' function 
-        # to extract non-empty metadata strings
+
         meta_vals <- c(d$dose, d$freq, d$route, d$duration)
         meta_vals <- meta_vals[meta_vals != "" & !is.na(meta_vals)]
         meta_sub  <- paste(meta_vals, collapse = " | ")
-        
-        actionButton(ns(paste0("ab_", i)), 
-                     HTML(paste0(
-                       "<div style='text-align:left;'>",
-                       "<div class='rx-brand-name' style='font-size:0.9rem;'>", d$brand_name, "</div>",
-                       "<div style='font-size: 0.75rem; color: #e67e22; font-weight:600;'>", meta_sub, "</div>",
-                       "</div>"
-                     )), 
-                     class="btn btn-sm btn-outline-secondary w-100 mb-1", 
-                     onclick = sprintf("Shiny.setInputValue('%s', '%s')", ns("add_rx_id"), d$id)
+
+        # Row: [Add button (flex-grow)] [Edit icon] [Delete icon]
+        div(class = "d-flex align-items-stretch mb-1 gap-1",
+            tags$button(
+              class   = "btn btn-sm btn-outline-secondary flex-grow-1 text-start",
+              onclick = sprintf("Shiny.setInputValue('%s','%s',{priority:'event'})", ns("add_rx_id"), d$id),
+              HTML(paste0(
+                "<div class='rx-brand-name' style='font-size:0.9rem;'>", d$brand_name, "</div>",
+                "<div style='font-size:0.75rem;color:#e67e22;font-weight:600;'>", meta_sub, "</div>"
+              ))
+            ),
+            tags$button(
+              class   = "btn btn-sm btn-outline-warning",
+              title   = "Edit in master list",
+              onclick = sprintf("Shiny.setInputValue('%s','%s',{priority:'event'})", ns("edit_master_id"), d$id),
+              icon("pencil-alt")
+            ),
+            tags$button(
+              class   = "btn btn-sm btn-outline-danger",
+              title   = "Delete from master list",
+              onclick = sprintf("Shiny.setInputValue('%s','%s',{priority:'event'})", ns("del_master_id"), d$id),
+              icon("trash")
+            )
         )
       })
     })
@@ -372,7 +483,7 @@ mobile_rx_server <- function(id, pool, current_pt, user_info) {
       lapply(1:nrow(df), function(i) {
         sel <- !is.null(rx_meds$selected_idx) && rx_meds$selected_idx == i
         tagList(
-          div(class = paste("rx-card p-3", if(sel) "selected"), onclick = sprintf("Shiny.setInputValue('%s', %d)", ns("select_rx_card"), i),
+          div(class = paste("rx-card p-3", if(sel) "selected"), onclick = sprintf("Shiny.setInputValue('%s', %d, {priority:'event'})", ns("select_rx_card"), i),
               div(class="d-flex justify-content-between align-items-start",
                   div(span(class="rx-brand-name", df$brand_name[i]), div(class="rx-generic-name", df$generic[i]),
                       div(class="mt-1", 
@@ -380,7 +491,7 @@ mobile_rx_server <- function(id, pool, current_pt, user_info) {
                           span(class="rx-badge", icon("clock"), df$freq[i]), 
                           span(class="rx-badge", icon("map-marker-alt"), df$route[i]))),
                   actionButton(ns(paste0("del_", i)), NULL, icon("trash"), class="btn btn-sm btn-outline-danger border-0", 
-                               onclick = sprintf("event.stopPropagation(); Shiny.setInputValue('%s', %d)", ns("del_rx_idx"), i)))),
+                               onclick = sprintf("event.stopPropagation(); Shiny.setInputValue('%s', %d, {priority:'event'})", ns("del_rx_idx"), i)))),
           if(sel) render_quick_edit())
       })
     })

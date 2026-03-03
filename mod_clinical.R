@@ -172,6 +172,7 @@ clinical_server <- function(id, pool, current_pt, user_info) {
     reset_clinical_ui <- function() {
       note_state$active_visit_id <- NULL
       note_state$active_visit_date <- format(Sys.Date(), "%d %b %Y")
+      is_locked(FALSE)
       
       updateTextInput(session, "v_bp", value = "")
       updateNumericInput(session, "v_hr", value = NA)
@@ -235,74 +236,65 @@ clinical_server <- function(id, pool, current_pt, user_info) {
     })
     
     # --- 5. VISIT HISTORY SIDEBAR ---
+    # Each tile uses onclick=Shiny.setInputValue to communicate the visit ID
+    # via a single stable input — no dynamic observer creation needed.
+    # This also fixes new-visit tiles not responding after save (they re-render
+    # with the same onclick pattern and the single observer below handles them).
     output$visit_tiles_ui <- renderUI({
-      refresh_visits() 
+      refresh_visits()
       req(current_pt())
-      
-      visits <- dbGetQuery(pool, 
-                           "SELECT id, visit_date FROM visitsmodule WHERE patient_id = $1 ORDER BY visit_date DESC", 
+
+      visits <- dbGetQuery(pool,
+                           "SELECT id, visit_date FROM visitsmodule WHERE patient_id = $1 ORDER BY visit_date DESC",
                            list(as.integer(current_pt()$id)))
-      
-      if(nrow(visits) == 0) return(p("No past visits found.", class="text-muted ps-2 mt-2"))
-      
+
+      if (nrow(visits) == 0) return(p("No past visits found.", class = "text-muted ps-2 mt-2"))
+
       lapply(1:nrow(visits), function(i) {
-        div(class="mb-2",
-            actionButton(ns(paste0("load_visit_", visits$id[i])), 
-                         label = div(class="d-flex justify-content-between w-100",
-                                     span(icon("calendar-day"), " ", format(as.Date(visits$visit_date[i]), "%d %b %Y"))),
-                         class="btn btn-outline-secondary w-100 text-start shadow-sm py-2")
+        div(class = "mb-2",
+            tags$button(
+              class   = "btn btn-outline-secondary w-100 text-start shadow-sm py-2",
+              onclick = sprintf("Shiny.setInputValue('%s', %d, {priority: 'event'})",
+                                ns("load_visit_id"), visits$id[i]),
+              div(class = "d-flex justify-content-between w-100",
+                  span(icon("calendar-day"), " ",
+                       format(as.Date(visits$visit_date[i]), "%d %b %Y")))
+            )
         )
       })
     })
-    
-    # Dynamic Observer for Sidebar Links
-    observe({
-      req(current_pt())
-      visits <- dbGetQuery(pool, "SELECT id FROM visitsmodule WHERE patient_id = $1", list(as.integer(current_pt()$id)))
-      for (vid in visits$id) {
-        local({
-          this_vid <- vid
-          observeEvent(input[[paste0("load_visit_", this_vid)]], {
-            res <- dbGetQuery(pool, "SELECT visit_date, visit_json FROM visitsmodule WHERE id = $1", list(as.integer(this_vid)))
-            req(nrow(res) > 0)
-            
-            note_state$active_visit_id <- this_vid
-            note_state$active_visit_date <- format(as.Date(res$visit_date[1]), "%d %b %Y")
-            
-            data <- jsonlite::fromJSON(res$visit_json[1])
-            
-            # Populate Vitals and Notes
-            updateTextInput(session, "v_bp", value = data$vitals$bp %||% "")
-            updateNumericInput(session, "v_hr", value = data$vitals$hr %||% NA)
-            updateNumericInput(session, "v_weight", value = data$vitals$weight %||% NA)
-            updateTextInput(session, "v_temp", value = data$vitals$temp %||% "")
-            updateTextAreaInput(session, "clinic_notes", value = data$clinic_notes %||% "")
-            
-            # Handle Follow-up Date (Safety check for nulls)
-            # Handle Follow-up Date safely
-            f_date <- data$followup_date
-            
-            # 1. Ensure it's not NULL and has a value
-            if (shiny::isTruthy(f_date)) {
-              
-              # 2. Extract the first element if it's a list/vector, and convert to character
-              f_date_str <- as.character(unlist(f_date)[1])
-              
-              # 3. Final check: is the resulting string a valid date?
-              tryCatch({
-                updateDateInput(session, "v_followup", value = as.Date(f_date_str))
-              }, error = function(e) {
-                updateDateInput(session, "v_followup", value = NA)
-              })
-              
-            } else {
-              updateDateInput(session, "v_followup", value = NA)
-            }
-            
-            is_locked(TRUE)
-          })
-        })
+
+    # Single observer for all visit tile clicks — registered once, never leaks.
+    observeEvent(input$load_visit_id, {
+      this_vid <- input$load_visit_id
+      res <- dbGetQuery(pool, "SELECT visit_date, visit_json FROM visitsmodule WHERE id = $1",
+                        list(as.integer(this_vid)))
+      req(nrow(res) > 0)
+
+      note_state$active_visit_id   <- this_vid
+      note_state$active_visit_date <- format(as.Date(res$visit_date[1]), "%d %b %Y")
+
+      data <- jsonlite::fromJSON(res$visit_json[1])
+
+      updateTextInput(session, "v_bp",     value = data$vitals$bp     %||% "")
+      updateNumericInput(session, "v_hr",     value = data$vitals$hr     %||% NA)
+      updateNumericInput(session, "v_weight", value = data$vitals$weight %||% NA)
+      updateTextInput(session, "v_temp",   value = data$vitals$temp   %||% "")
+      updateTextAreaInput(session, "clinic_notes", value = data$clinic_notes %||% "")
+
+      # Handle follow-up date safely (may be null, scalar, or wrapped array)
+      f_date <- data$followup_date
+      if (shiny::isTruthy(f_date)) {
+        f_date_str <- as.character(unlist(f_date)[1])
+        tryCatch(
+          updateDateInput(session, "v_followup", value = as.Date(f_date_str)),
+          error = function(e) updateDateInput(session, "v_followup", value = NA)
+        )
+      } else {
+        updateDateInput(session, "v_followup", value = NA)
       }
+
+      is_locked(TRUE)
     })
     
     # --- 6. SAVE LOGIC (Consolidated) ---
@@ -435,6 +427,7 @@ clinical_server <- function(id, pool, current_pt, user_info) {
     observeEvent(input$execute_delete, {
       dbExecute(pool, "DELETE FROM visitsmodule WHERE id = $1::int", list(as.integer(note_state$active_visit_id)))
       refresh_visits(refresh_visits() + 1)
+      save_count(save_count() + 1)   # also refresh Summary tab
       reset_clinical_ui()
       removeModal()
       showNotification("Record Deleted", type = "warning")

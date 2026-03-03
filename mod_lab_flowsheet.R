@@ -76,7 +76,7 @@ lab_flowsheet_server <- function(id, pool, current_pt, lab_targets_raw,
     })
     
     observeEvent(parent_nav(), {
-      if (parent_nav() == "4. Labs Flowsheet") {
+      if (parent_nav() == "Labs") {
         refresh_trigger(refresh_trigger() + 1)
       }
     })
@@ -449,7 +449,6 @@ lab_flowsheet_server <- function(id, pool, current_pt, lab_targets_raw,
     # ════════════════════════════════════════════════════════
     observeEvent(input$save_flowsheet, {
       req(current_pt(), user_info(), input$history_table)
-      save_count(save_count() + 1)
       curr_user <- user_info()$username
       pt_id     <- as.character(current_pt()$id)
       
@@ -568,15 +567,16 @@ lab_flowsheet_server <- function(id, pool, current_pt, lab_targets_raw,
         }
         
         DBI::dbExecute(con, "COMMIT")
-        
+        save_count(save_count() + 1)   # increment AFTER successful commit
+
         msg <- paste0("Flowsheet saved: ", n_numeric, " numeric, ",
                       n_text, " text value(s) written.")
         if (n_delete > 0)
           msg <- paste0(msg, " ", n_delete, " cleared cell(s) removed from DB.")
         showNotification(msg, type = "message", duration = 6)
-        
+
         # Update the inline "Data saved" banner
-        save_msg(paste0("✔ Data saved — ", format(Sys.time(), "%H:%M:%S")))
+        save_msg(paste0("Data saved — ", format(Sys.time(), "%H:%M:%S")))
         refresh_trigger(refresh_trigger() + 1)
         
       }, error = function(e) {

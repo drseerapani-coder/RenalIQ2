@@ -80,7 +80,8 @@ auth_server <- function(id, pool) {
         
         if (is_valid) {
           user_auth$is_logged <- TRUE
-          user_auth$user_info <- user_data
+          # Store only the columns needed by modules — never expose password_hash
+          user_auth$user_info <- user_data[, c("id", "username", "full_name", "role"), drop = FALSE]
           showNotification(paste("Welcome,", user_data$full_name), type = "message")
         } else {
           output$error_msg <- renderUI({ p("Invalid username or password", class="text-danger mt-2 text-center") })

@@ -99,17 +99,31 @@ timeline_server <- function(id, pool, current_pt, refresh_trigger = reactive(0))
       req(current_pt(), pool)
       refresh_trigger()
       pid <- as.character(current_pt()$id)
-      
+
       tryCatch({
         list(
-          visits = dbGetQuery(pool, paste0("SELECT visit_date::date as v_date, visit_json, clinical_notes FROM visitsmodule WHERE patient_id::text = '", pid, "' ORDER BY visit_date DESC")),
-          # Fetch labs, ordering by date DESC so the most recent is first
-          labs = dbGetQuery(pool, paste0("SELECT test_date::date as l_date, test_name, num_val FROM labs WHERE patient_id::text = '", pid, "' ORDER BY test_date DESC")),
-          rx = dbGetQuery(pool, paste0("SELECT visit_date::date as v_date, meds_json FROM prescriptions WHERE patient_id::text = '", pid, "'"))
+          # clinical_notes is stored inside visit_json; select only what exists
+          visits = dbGetQuery(pool,
+            "SELECT visit_date::date as v_date, visit_json
+             FROM visitsmodule WHERE patient_id::text = $1
+             ORDER BY visit_date DESC",
+            list(pid)
+          ),
+          labs = dbGetQuery(pool,
+            "SELECT test_date::date as l_date, test_name, num_val
+             FROM labs WHERE patient_id::text = $1
+             ORDER BY test_date DESC",
+            list(pid)
+          ),
+          rx = dbGetQuery(pool,
+            "SELECT visit_date::date as v_date, meds_json
+             FROM prescriptions WHERE patient_id::text = $1",
+            list(pid)
+          )
         )
-      }, error = function(e) { 
+      }, error = function(e) {
         message("Data fetch error: ", e$message)
-        NULL 
+        NULL
       })
     })
     
@@ -188,8 +202,9 @@ timeline_server <- function(id, pool, current_pt, refresh_trigger = reactive(0))
               tags$tbody(lapply(1:nrow(m_df), function(j) {
                 row_vals   <- as.character(m_df[j, ])
                 translated <- sapply(row_vals, function(cell) {
-                  clean <- trimws(cell)
-                  if (!is.null(f_map) && clean %in% names(f_map)) return(unname(f_map[clean]))
+                  clean      <- trimws(cell)
+                  lookup_key <- tolower(clean)   # freq_list.csv keys are lowercase; codes are mixed-case
+                  if (!is.null(f_map) && lookup_key %in% names(f_map)) return(unname(f_map[lookup_key]))
                   return(cell)
                 })
                 tags$tr(
@@ -229,8 +244,8 @@ timeline_server <- function(id, pool, current_pt, refresh_trigger = reactive(0))
                      span(strong("Wt: "), v_json$vitals$weight %||% "-", "kg")),
                  
                  layout_column_wrap(width = 1,
-                                    div(tags$h6("Examination & Plan", class="border-bottom text-muted pb-1"), 
-                                        div(class="clinical-text exam-notes", v_json$clinic_notes %||% this_visit$clinical_notes %||% "No notes.")),
+                                    div(tags$h6("Examination & Plan", class="border-bottom text-muted pb-1"),
+                                        div(class="clinical-text exam-notes", v_json$clinic_notes %||% "No notes.")),
                                     
                                     div(tags$h6("Latest Lab Parameters", class="text-info border-bottom pb-1"),
                                         div(class="lab-text lab-results-text", 

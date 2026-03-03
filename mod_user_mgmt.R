@@ -78,51 +78,72 @@ user_management_server <- function(id, pool) {
       df <- dbGetQuery(pool, "SELECT username, full_name, role FROM users")
       datatable(df, options = list(pageLength = 5, dom = 'tp'), rownames = FALSE)
     })
+
+    # Create new user — was missing entirely (button did nothing)
+    observeEvent(input$save_user, {
+      req(input$new_username, input$new_fullname, input$new_password)
+      clean_user <- trimws(input$new_username)
+      clean_name <- trimws(input$new_fullname)
+
+      tryCatch({
+        hash <- sodium::password_store(input$new_password)
+        dbExecute(pool,
+          "INSERT INTO users (username, full_name, password_hash, role)
+           VALUES ($1, $2, $3, $4)",
+          list(clean_user, clean_name, hash, input$new_role)
+        )
+        updateTextInput(session, "new_username", value = "")
+        updateTextInput(session, "new_fullname", value = "")
+        updateTextInput(session, "new_password", value = "")
+        showNotification(paste("User", clean_user, "created successfully."), type = "message")
+        # Refresh the user list table
+        output$user_list_table <- renderDT({
+          df <- dbGetQuery(pool, "SELECT username, full_name, role FROM users")
+          datatable(df, options = list(pageLength = 5, dom = 'tp'), rownames = FALSE)
+        })
+      }, error = function(e) {
+        showNotification(paste("Error creating user:", e$message), type = "error")
+        message("User creation error: ", e$message)
+      })
+    })
     
     # 2. Daily Visits Reactive (Seen on Review Date)
     daily_visits <- reactive({
       req(input$review_date)
-      query <- glue::glue_sql("
-        SELECT 
-          v.id as visit_id,
-          CONCAT(p.first_name, ' ', p.last_name) as patient_name
-        FROM visitsmodule v
-        LEFT JOIN registrations p ON TRIM(v.patient_id::text) = TRIM(p.id::text)
-        WHERE v.visit_date::date = {input$review_date}
-        ORDER BY v.updated_at DESC
-      ", .con = pool)
-      
       tryCatch({
-        dbGetQuery(pool, query)
+        dbGetQuery(pool,
+          "SELECT
+             v.id as visit_id,
+             CONCAT(p.first_name, ' ', p.last_name) as patient_name
+           FROM visitsmodule v
+           LEFT JOIN registrations p ON TRIM(v.patient_id::text) = TRIM(p.id::text)
+           WHERE v.visit_date::date = $1::date
+           ORDER BY v.updated_at DESC",
+          list(as.character(input$review_date))
+        )
       }, error = function(e) {
         message("Daily Visit Error: ", e$message)
         data.frame(visit_id = character(), patient_name = character())
       })
     })
-    
+
     # 3. Follow-up Reactive (Scheduled for Follow-up Date)
     followup_list <- reactive({
       req(input$followup_date_picker)
-      
-      # We extract the date, handle empty arrays/strings, 
-      # and cast to date for comparison.
-      query <- glue::glue_sql("
-        SELECT 
-          v.id as visit_id,
-          CONCAT(p.first_name, ' ', p.last_name) as patient_name
-        FROM visitsmodule v
-        LEFT JOIN registrations p ON TRIM(v.patient_id::text) = TRIM(p.id::text)
-        WHERE 
-          NULLIF(v.visit_json ->> 'followup_date', '[]') IS NOT NULL 
-          AND (v.visit_json ->> 'followup_date')::date = {input$followup_date_picker}
-        ORDER BY p.first_name ASC
-      ", .con = pool)
-      
       tryCatch({
-        dbGetQuery(pool, query)
+        dbGetQuery(pool,
+          "SELECT
+             v.id as visit_id,
+             CONCAT(p.first_name, ' ', p.last_name) as patient_name
+           FROM visitsmodule v
+           LEFT JOIN registrations p ON TRIM(v.patient_id::text) = TRIM(p.id::text)
+           WHERE
+             NULLIF(v.visit_json ->> 'followup_date', '[]') IS NOT NULL
+             AND (v.visit_json ->> 'followup_date')::date = $1::date
+           ORDER BY p.first_name ASC",
+          list(as.character(input$followup_date_picker))
+        )
       }, error = function(e) {
-        # If the JSON value isn't a valid date format, it might error.
-        # This keeps the app running.
         message("Followup JSON Error: ", e$message)
         data.frame(visit_id = integer(), patient_name = character())
       })

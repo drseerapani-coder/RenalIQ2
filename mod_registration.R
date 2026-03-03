@@ -180,10 +180,11 @@ registration_server <- function(id, pool, current_pt_out, user_info) {
     
     # 7. Database Save Logic
     observeEvent(input$save_pt, {
-      req(input$first_name, input$dob)
+      req(input$first_name, input$dob, user_info())
 
-      clean_dob <- as.character(input$dob)
-      pid       <- selected_pt()$id  # NULL for new patients
+      clean_dob  <- as.character(input$dob)
+      pid        <- selected_pt()$id  # NULL for new patients
+      curr_user  <- user_info()$username
 
       tryCatch({
         if (!is.null(pid)) {
@@ -198,6 +199,7 @@ registration_server <- function(id, pool, current_pt_out, user_info) {
                  input$phone, input$address1, input$allergies, input$comments,
                  input$hospital_number, as.integer(pid))
           )
+          log_audit(pool, curr_user, "UPDATE", "registrations", as.character(pid))
           showNotification("Patient record updated.", type = "message")
         } else {
           # --- INSERT NEW PATIENT ---
@@ -211,6 +213,7 @@ registration_server <- function(id, pool, current_pt_out, user_info) {
                  input$phone, input$address1, input$allergies, input$comments,
                  input$hospital_number)
           )$id
+          log_audit(pool, curr_user, "CREATE", "registrations", as.character(pid))
           showNotification("New patient registered.", type = "message")
         }
 
