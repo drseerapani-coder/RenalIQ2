@@ -179,7 +179,7 @@ clinical_server <- function(id, pool, current_pt, user_info) {
       updateNumericInput(session, "v_weight", value = NA)
       updateTextInput(session, "v_temp", value = "")
       updateTextAreaInput(session, "clinic_notes", value = "")
-      updateDateInput(session, "v_followup", value = NA)
+      updateDateInput(session, "v_followup", value = Sys.Date())
       updateRadioButtons(session, "quick_interval", selected = character(0))
       # Note: pmh_data is NOT reset here to keep it persistent for the patient
     }
@@ -288,10 +288,10 @@ clinical_server <- function(id, pool, current_pt, user_info) {
         f_date_str <- as.character(unlist(f_date)[1])
         tryCatch(
           updateDateInput(session, "v_followup", value = as.Date(f_date_str)),
-          error = function(e) updateDateInput(session, "v_followup", value = NA)
+          error = function(e) updateDateInput(session, "v_followup", value = Sys.Date())
         )
       } else {
-        updateDateInput(session, "v_followup", value = NA)
+        updateDateInput(session, "v_followup", value = Sys.Date())
       }
 
       is_locked(TRUE)
@@ -377,9 +377,7 @@ clinical_server <- function(id, pool, current_pt, user_info) {
     # --- 7. PMHx TABLE LOGIC (Fixed Delete) ---
     output$past_medical_history_table <- renderRHandsontable({
       df <- pmh_data()
-      rhandsontable(df, stretchH = "all", height = 300) %>%
-        hot_col("Condition", type = "text") %>%
-        hot_col("Year", type = "text")
+      rhandsontable(df, stretchH = "all", height = 300, useTypes = FALSE)
     })
     
     observeEvent(input$add_past_medical_history_row, {

@@ -22,7 +22,9 @@ RUN apt-get update && apt-get install -y \
 RUN R -e "install.packages(c('shiny', 'bslib', 'pool', 'DBI', 'RPostgres', \
     'dplyr', 'tidyr', 'lubridate', 'stringr', 'DT', 'shinyjs', \
     'rhandsontable', 'jsonlite', 'glue', 'pdftools', 'tesseract', \
-    'openai', 'shinycssloaders', 'sodium'), repos='https://cran.rstudio.com/')"
+    'httr', 'base64enc', 'shinycssloaders', 'sodium'), repos='https://cran.rstudio.com/')"
+# Note: 'openai' R package removed — AI calls now go through httr directly,
+# supporting both Ollama (local, default) and OpenAI (cloud fallback).
 
 # 3. App Setup
 RUN rm -rf /srv/shiny-server/*

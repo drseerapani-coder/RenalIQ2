@@ -190,13 +190,6 @@ server <- function(input, output, session) {
 
   }, ignoreInit = TRUE, once = TRUE)
   
-  # Debug Logger
-  observe({
-    pt <- current_pt()
-    if(!is.null(pt)) {
-      message("MAIN SERVER RECEIVED PT: ", pt$first_name)
-    }
-  })
   
   # Sticky Header Logic
   # Sticky Header Logic with Age Calculation

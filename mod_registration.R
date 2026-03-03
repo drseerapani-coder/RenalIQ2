@@ -178,14 +178,10 @@ registration_server <- function(id, pool, current_pt_out, user_info) {
       pt_state$view_mode <- "editor"
     })
     
-    # 7. Database Save Logic
-    observeEvent(input$save_pt, {
-      req(input$first_name, input$dob, user_info())
+    pending_pt_data <- reactiveVal(NULL)   # holds form data pending the duplicate-override decision
 
-      clean_dob  <- as.character(input$dob)
-      pid        <- selected_pt()$id  # NULL for new patients
-      curr_user  <- user_info()$username
-
+    # --- Local helper: performs the actual DB write once duplicates are resolved ---
+    execute_save <- function(pid, d, curr_user) {
       tryCatch({
         if (!is.null(pid)) {
           # --- UPDATE EXISTING PATIENT ---
@@ -195,31 +191,32 @@ registration_server <- function(id, pool, current_pt_out, user_info) {
                  phone = $5, address1 = $6, allergies = $7, comments = $8,
                  hospital_number = $9, updated_at = NOW()
              WHERE id = $10",
-            list(input$first_name, input$last_name, clean_dob, input$gender,
-                 input$phone, input$address1, input$allergies, input$comments,
-                 input$hospital_number, as.integer(pid))
+            list(d$first_name, d$last_name, d$dob, d$gender,
+                 d$phone, d$address1, d$allergies, d$comments,
+                 d$hospital_number, as.integer(pid))
           )
           log_audit(pool, curr_user, "UPDATE", "registrations", as.character(pid))
           showNotification("Patient record updated.", type = "message")
+          new_pid <- pid
         } else {
           # --- INSERT NEW PATIENT ---
-          pid <- DBI::dbGetQuery(pool,
+          new_pid <- DBI::dbGetQuery(pool,
             "INSERT INTO registrations
                (first_name, last_name, dob, gender, phone, address1,
                 allergies, comments, hospital_number, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
              RETURNING id",
-            list(input$first_name, input$last_name, clean_dob, input$gender,
-                 input$phone, input$address1, input$allergies, input$comments,
-                 input$hospital_number)
+            list(d$first_name, d$last_name, d$dob, d$gender,
+                 d$phone, d$address1, d$allergies, d$comments,
+                 d$hospital_number)
           )$id
-          log_audit(pool, curr_user, "CREATE", "registrations", as.character(pid))
+          log_audit(pool, curr_user, "CREATE", "registrations", as.character(new_pid))
           showNotification("New patient registered.", type = "message")
         }
 
         # Re-fetch the saved row and update both local and global state
         updated <- as.list(DBI::dbGetQuery(pool,
-          "SELECT * FROM registrations WHERE id = $1", list(as.integer(pid)))[1, ])
+          "SELECT * FROM registrations WHERE id = $1", list(as.integer(new_pid)))[1, ])
         selected_pt(updated)
         current_pt_out(updated)
         save_trigger(save_trigger() + 1)
@@ -228,6 +225,87 @@ registration_server <- function(id, pool, current_pt_out, user_info) {
         showNotification(paste("Save Error:", e$message), type = "error")
         message("Registration Save Error: ", e$message)
       })
+    }
+
+    # 7. Database Save Logic
+    observeEvent(input$save_pt, {
+      req(input$first_name, input$dob, user_info())
+
+      clean_dob <- as.character(input$dob)
+      pid       <- selected_pt()$id   # NULL for new patients
+      curr_user <- user_info()$username
+
+      form_data <- list(
+        first_name      = trimws(input$first_name),
+        last_name       = trimws(input$last_name),
+        dob             = clean_dob,
+        gender          = input$gender,
+        phone           = trimws(input$phone),
+        address1        = input$address1,
+        allergies       = input$allergies,
+        comments        = input$comments,
+        hospital_number = trimws(input$hospital_number)
+      )
+
+      # Duplicate check — only for new registrations, not updates
+      if (is.null(pid)) {
+        dups <- tryCatch(
+          DBI::dbGetQuery(pool,
+            "SELECT id, first_name, last_name, dob, phone, hospital_number
+               FROM registrations
+              WHERE (LOWER(TRIM(first_name)) = LOWER($1) AND LOWER(TRIM(last_name)) = LOWER($2))
+                 OR (LENGTH($3) > 0 AND TRIM(phone) = $3 AND LOWER(TRIM(last_name)) = LOWER($2))
+              LIMIT 5",
+            list(form_data$first_name, form_data$last_name, form_data$phone)
+          ),
+          error = function(e) { message("Duplicate check error: ", e$message); data.frame() }
+        )
+
+        if (nrow(dups) > 0) {
+          pending_pt_data(c(form_data, list(curr_user = curr_user)))
+
+          dup_rows <- lapply(1:nrow(dups), function(i) {
+            d <- dups[i, ]
+            tags$li(class = "mb-1",
+              tags$strong(paste(d$first_name, d$last_name)),
+              paste0(
+                " | DOB: ", as.character(d$dob),
+                " | Phone: ", if (!is.na(d$phone) && nchar(trimws(d$phone)) > 0) d$phone else "—",
+                if (!is.na(d$hospital_number) && nchar(trimws(d$hospital_number)) > 0)
+                  paste0(" | UHID: ", d$hospital_number) else ""
+              )
+            )
+          })
+
+          showModal(modalDialog(
+            title = tags$h4(class = "text-warning", icon("exclamation-triangle"),
+                            " Possible Duplicate Patient"),
+            p("The following existing record(s) may already represent this patient:"),
+            tags$ul(dup_rows),
+            p(class = "text-muted small mt-2",
+              "If this is genuinely a different person, click 'Register Anyway'. ",
+              "Otherwise click 'Cancel' and select the existing record to update it."),
+            footer = tagList(
+              modalButton("Cancel — Select Existing"),
+              actionButton(ns("force_register"), "Register Anyway",
+                           class = "btn-warning fw-bold")
+            ),
+            easyClose = FALSE
+          ))
+          return()
+        }
+      }
+
+      execute_save(pid, form_data, curr_user)
+    })
+
+    # Override: user confirmed this is genuinely a new patient — proceed with INSERT
+    observeEvent(input$force_register, {
+      req(pending_pt_data())
+      p <- pending_pt_data()
+      removeModal()
+      execute_save(NULL, p, p$curr_user)
+      pending_pt_data(NULL)
     })
     
     return(list(

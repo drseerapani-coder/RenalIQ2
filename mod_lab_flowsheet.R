@@ -134,25 +134,27 @@ lab_flowsheet_server <- function(id, pool, current_pt, lab_targets_raw,
         }
       "))
       
-      rhandsontable(df_final,
-                    height   = 500,
-                    width    = "100%",
-                    stretchH = "none",
-                    useTypes = FALSE) %>%
-        hot_table(highlightCol = TRUE, highlightRow = TRUE) %>%
-        hot_cols(fixedColumnsLeft = 1) %>%
-        hot_col("Parameter", width = 200, readOnly = TRUE) %>%
-        hot_cols(colWidths = 100) %>%
-        hot_context_menu(
-          allowRowEdit = FALSE,
-          allowColEdit = TRUE,
-          customOpts = list(
-            delete_column = list(
-              name     = "Delete this entire date column",
-              callback = delete_js
+      suppressWarnings(
+        rhandsontable(df_final,
+                      height   = 500,
+                      width    = "100%",
+                      stretchH = "none",
+                      useTypes = FALSE) %>%
+          hot_table(highlightCol = TRUE, highlightRow = TRUE) %>%
+          hot_cols(fixedColumnsLeft = 1) %>%
+          hot_col("Parameter", width = 200, readOnly = TRUE) %>%
+          hot_cols(colWidths = 100) %>%
+          hot_context_menu(
+            allowRowEdit = FALSE,
+            allowColEdit = TRUE,
+            customOpts = list(
+              delete_column = list(
+                name     = "Delete this entire date column",
+                callback = delete_js
+              )
             )
           )
-        )
+      )
     })
     
     # ════════════════════════════════════════════════════════

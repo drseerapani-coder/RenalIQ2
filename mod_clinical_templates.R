@@ -47,7 +47,7 @@ clinical_ui <- function(id) {
                       numericInput(ns("v_hr"), "Pulse", value = NA),
                       numericInput(ns("v_weight"), "Weight (kg)", value = NA),
                       textInput(ns("v_temp"), "Temp", placeholder = "98.4"),
-                      dateInput(ns("v_followup"), "Follow-up", value = NA)
+                      dateInput(ns("v_followup"), "Follow-up", value = Sys.Date())
                     ),
                     tags$hr(style = "margin: 20px 0; border-top: 2px solid #eee;"),
                     layout_column_wrap(
@@ -110,7 +110,7 @@ clinical_server <- function(id, pool, current_pt, user_info) {
       updateTextInput(session, "v_bp", value = ""); updateNumericInput(session, "v_hr", value = NA)
       updateNumericInput(session, "v_weight", value = NA); updateTextInput(session, "v_temp", value = "")
       updateTextAreaInput(session, "clinic_notes", value = "")
-      updateDateInput(session, "v_followup", value = NA)
+      updateDateInput(session, "v_followup", value = Sys.Date())
     }
     
     observe({ 
