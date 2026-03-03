@@ -50,6 +50,7 @@ lab_flowsheet_server <- function(id, pool, current_pt, lab_targets_raw,
                                  parent_nav, user_info) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
+    save_count <- reactiveVal(0)
     
     # ── Reactive state ───────────────────────────────────────
     refresh_trigger      <- reactiveVal(0)
@@ -217,7 +218,7 @@ lab_flowsheet_server <- function(id, pool, current_pt, lab_targets_raw,
         "DELETE FROM labs WHERE patient_id::text = $1 AND test_date::date = $2::date",
         list(as.character(current_pt()$id), target_date)
       )
-      
+      save_count(save_count() + 1)
       pending_delete_date(NULL)           # clear after use
       refresh_trigger(refresh_trigger() + 1)
       removeModal()
@@ -425,6 +426,7 @@ lab_flowsheet_server <- function(id, pool, current_pt, lab_targets_raw,
                   paste0(pt_id, "_", v_date))
         
         DBI::dbExecute(con, "COMMIT")
+        save_count(save_count() + 1)
         
         refresh_trigger(refresh_trigger() + 1)
         removeModal()
@@ -447,7 +449,7 @@ lab_flowsheet_server <- function(id, pool, current_pt, lab_targets_raw,
     # ════════════════════════════════════════════════════════
     observeEvent(input$save_flowsheet, {
       req(current_pt(), user_info(), input$history_table)
-      
+      save_count(save_count() + 1)
       curr_user <- user_info()$username
       pt_id     <- as.character(current_pt()$id)
       
@@ -587,6 +589,10 @@ lab_flowsheet_server <- function(id, pool, current_pt, lab_targets_raw,
     # NOTE — FIX #6: Removed the dead output$lab_hot_table block that referenced
     # a non-existent lab_data() reactive. It caused startup errors and was
     # never referenced in the UI.
+    
+    return(list(
+      saved = reactive({ save_count() })
+    ))
     
   })
 }

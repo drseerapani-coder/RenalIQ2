@@ -1,4 +1,13 @@
 # mod_mobile_rx.R
+# Helper to handle NULL/NA/Empty strings in one go
+# Vector-safe NULL/NA/Empty helper
+`%||%` <- function(a, b) {
+  if (length(a) > 0 && !is.null(a) && !is.na(a[1]) && as.character(a[1]) != "") {
+    return(as.character(a[1]))
+  } else {
+    return(as.character(b))
+  }
+}
 
 mobile_rx_ui <- function(id) {
   ns <- NS(id)
@@ -51,6 +60,7 @@ mobile_rx_ui <- function(id) {
 mobile_rx_server <- function(id, pool, current_pt, user_info) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
+    save_count <- reactiveVal(0)
     
     # --- State ---
     rx_master <- reactiveVal(data.frame())
@@ -62,13 +72,19 @@ mobile_rx_server <- function(id, pool, current_pt, user_info) {
     )
     rx_meta <- reactiveValues(is_history = FALSE, history_date = NULL)
     
+    # Update your clean_df function to handle NA specifically
     clean_df <- function(df) {
       if (is.null(df) || nrow(df) == 0) {
         return(data.frame(brand_name=character(), generic=character(), dose=character(), 
                           freq=character(), route=character(), duration=character(),
                           stringsAsFactors=FALSE))
       }
-      df[] <- lapply(df, function(x) { x[is.na(x)] <- ""; as.character(x) })
+      # Force all columns to character and replace NA with empty string
+      df[] <- lapply(df, function(x) {
+        x <- as.character(x)
+        x[is.na(x) | x == "NA"] <- "" 
+        return(x)
+      })
       return(as.data.frame(df))
     }
     
@@ -103,34 +119,112 @@ mobile_rx_server <- function(id, pool, current_pt, user_info) {
       dbExecute(pool, "INSERT INTO drug_master (brand_name, generic, dose, freq, route, duration) VALUES ($1, $2, $3, $4, $5, $6)", 
                 list(input$new_brand, input$new_generic, input$new_dose, input$new_freq, "Oral", input$new_dur))
       load_rx_master()
-      new_row <- data.frame(brand_name=input$new_brand, generic=input$new_generic, dose=input$new_dose, 
-                            freq=input$new_freq, route="Oral", duration=input$new_dur, stringsAsFactors=FALSE)
-      rx_meds$df <- clean_df(rbind(rx_meds$df, new_row))
+      new_row <- data.frame(
+        brand_name = input$new_brand, 
+        generic    = input$new_generic, 
+        dose       = input$new_dose, 
+        freq       = input$new_freq, 
+        route      = "Oral", 
+        duration   = input$new_dur, 
+        stringsAsFactors = FALSE
+      )
+      
+      # Ensure columns match exactly
+      rx_meds$df <- clean_df(dplyr::bind_rows(rx_meds$df, new_row))
       rx_meds$selected_idx <- nrow(rx_meds$df)
       removeModal()
       updateTextInput(session, "rx_q", value="")
     })
     
     # --- Live Input Sync ---
+    # --- Optimized Live Input Sync ---
+    observeEvent(list(input$ov_dose, input$ov_route, input$ov_dur, input$ov_freq), {
+      req(rx_meds$selected_idx)
+      idx <- as.numeric(rx_meds$selected_idx)
+      
+      # Update only if the input is not NULL to avoid clearing data on render
+      if (!is.null(input$ov_dose))  rx_meds$df$dose[idx]     <- input$ov_dose
+      if (!is.null(input$ov_route)) rx_meds$df$route[idx]    <- input$ov_route
+      if (!is.null(input$ov_dur))   rx_meds$df$duration[idx] <- input$ov_dur
+      
+      # Handle Frequency logic
+      if (!is.null(input$ov_freq) && input$ov_freq != "") {
+        rx_meds$df$freq[idx] <- input$ov_freq
+      }
+    }, ignoreInit = TRUE)
+    
+    # Separate observer for the "Stitch Grid" (OD/BD buttons) 
+    # so they don't fight with the manual text input
+    # Separate observer for the "Stitch Grid" (OD/BD buttons) 
+    # observe({
+    #   req(rx_meds$selected_idx)
+    #   idx <- as.numeric(rx_meds$selected_idx)
+    #   
+    #   # Safety check: ensure the index exists in the dataframe
+    #   req(nrow(rx_meds$df) >= idx)
+    #   
+    #   if (!is.null(rx_meds$s_cat) && rx_meds$s_cat %in% c("OD", "BD")) {
+    #     num <- as.numeric(rx_meds$s_num)
+    #     # Handle potential NA in s_num
+    #     req(!is.na(num)) 
+    #     
+    #     hr <- if(rx_meds$s_ampm == "PM" && num < 12) num + 12 else if(rx_meds$s_ampm == "AM" && num == 12) 24 else num
+    #     new_freq <- paste0(rx_meds$s_cat, hr)
+    #     
+    #     # FIX: Use isTRUE() or %in% to handle NA values safely
+    #     current_freq <- rx_meds$df$freq[idx]
+    #     
+    #     if (!isTRUE(current_freq == new_freq)) {
+    #       rx_meds$df$freq[idx] <- new_freq
+    #       updateTextInput(session, "ov_freq", value = new_freq)
+    #     }
+    #   }
+    # })
+    
+    # 1. Sync Manual Typing TO the Dataframe
+    # --- Robust Unified Data Sync ---
+    # --- Robust Unified Data Sync ---
     observe({
       req(rx_meds$selected_idx)
       idx <- as.numeric(rx_meds$selected_idx)
-      if (!is.null(input$ov_dose)) rx_meds$df$dose[idx] <- input$ov_dose
-      if (!is.null(input$ov_route)) rx_meds$df$route[idx] <- input$ov_route
-      if (!is.null(input$ov_dur)) rx_meds$df$duration[idx] <- input$ov_dur
-      if (!is.null(input$ov_freq) && input$ov_freq != "") {
-        rx_meds$df$freq[idx] <- input$ov_freq
-      } else if (rx_meds$s_cat %in% c("OD", "BD")) {
+      
+      # Use isolate so this observer ONLY triggers when text inputs change,
+      # NOT when the dataframe itself changes or when a new drug is added.
+      isolate({
+        if (idx > 0 && idx <= nrow(rx_meds$df)) {
+          # Use a debounce-like check: only update if input is NOT null
+          if(!is.null(input$ov_dose))  rx_meds$df$dose[idx]     <- input$ov_dose
+          if(!is.null(input$ov_freq))  rx_meds$df$freq[idx]     <- input$ov_freq
+          if(!is.null(input$ov_route)) rx_meds$df$route[idx]    <- input$ov_route
+          if(!is.null(input$ov_dur))   rx_meds$df$duration[idx] <- input$ov_dur
+        }
+      })
+    })
+    
+    # 2. Sync OD/BD Grid Buttons TO the Text Box
+    observeEvent(list(rx_meds$s_num, rx_meds$s_ampm, rx_meds$s_cat), {
+      req(rx_meds$selected_idx)
+      if (rx_meds$s_cat %in% c("OD", "BD")) {
         num <- as.numeric(rx_meds$s_num)
+        req(!is.na(num))
+        
         hr <- if(rx_meds$s_ampm == "PM" && num < 12) num + 12 else if(rx_meds$s_ampm == "AM" && num == 12) 24 else num
-        rx_meds$df$freq[idx] <- paste0(rx_meds$s_cat, hr)
+        new_freq <- paste0(rx_meds$s_cat, hr)
+        
+        # This pushes the value into the UI box, which then triggers the observer above
+        updateTextInput(session, "ov_freq", value = new_freq)
       }
     })
     
+    # 3. Sync Fixed Codes (TDS/QID/etc) TO the Text Box
+    observeEvent(input$direct_freq, {
+      updateTextInput(session, "ov_freq", value = input$direct_freq)
+    })
     # --- UI Logic Builders ---
     render_quick_edit <- function() {
       idx <- as.numeric(rx_meds$selected_idx)
-      curr <- rx_meds$df[idx, ]
+      #curr <- rx_meds$df[idx, ]
+      curr <- isolate(rx_meds$df[idx, ])
       div(class="card border-warning mb-2",
           div(class="card-header bg-warning py-1 d-flex justify-content-between",
               tags$strong("Set Frequency"),
@@ -143,7 +237,7 @@ mobile_rx_server <- function(id, pool, current_pt, user_info) {
                                  onclick = sprintf("Shiny.setInputValue('%s', '%s')", ns("change_cat"), cat))
                   })),
               div(class="p-2 border rounded bg-white",
-                  if(rx_meds$s_cat %in% c("OD", "BD")) {
+                  if(rx_meds$s_cat %in% c("OD","BD")) {
                     div(class="d-flex gap-2",
                         div(class="stitch-grid", lapply(1:12, function(n) {
                           actionButton(ns(paste0("sn_", n)), as.character(n), 
@@ -155,7 +249,8 @@ mobile_rx_server <- function(id, pool, current_pt, user_info) {
                             actionButton(ns("s_pm"), "PM", class=if(rx_meds$s_ampm=="PM") "btn btn-xs btn-dark" else "btn btn-xs btn-outline-dark", onclick=sprintf("Shiny.setInputValue('%s','PM')", ns("change_ampm"))))
                     )
                   } else {
-                    codes <- switch(rx_meds$s_cat, "TDS/QID"=c("TDS","QID","PRN","STAT"), "Days"=c("MWF","TTS","Mon","Fri"), "Misc"=c("ALT","Weekly","RTX"))
+                    codes <- switch(rx_meds$s_cat, "TDS/QID"=c("TDS","QID","PRN","STAT"), "Days"=c("MWF","TTS","Mon",
+                                                                                                   "Tue","Wed","Thu","Fri","Sat","Sun"), "Misc"=c("ALT","Weekly","RTX","hepb"))
                     div(class="d-flex flex-wrap gap-1", lapply(codes, function(c) {
                       actionButton(ns(paste0("fc_", c)), c, class="btn btn-sm btn-outline-warning", onclick=sprintf("Shiny.setInputValue('%s','%s')", ns("direct_freq"), c))
                     }))
@@ -171,33 +266,105 @@ mobile_rx_server <- function(id, pool, current_pt, user_info) {
     }
     
     # --- Observers ---
+    # --- Robust Observers ---
     observeEvent(input$change_cat, { rx_meds$s_cat <- input$change_cat })
     observeEvent(input$change_num, { rx_meds$s_num <- input$change_num })
     observeEvent(input$change_ampm, { rx_meds$s_ampm <- input$change_ampm })
-    observeEvent(input$direct_freq, { updateTextInput(session, "ov_freq", value=""); rx_meds$df$freq[rx_meds$selected_idx] <- input$direct_freq })
+    
+    # Handle clicks on TDS, QID, PRN, MWF, etc.
+    observeEvent(input$direct_freq, {
+      req(rx_meds$selected_idx)
+      idx <- as.numeric(rx_meds$selected_idx)
+      
+      # 1. Update the master data frame
+      rx_meds$df$freq[idx] <- input$direct_freq
+      
+      # 2. Crucial: Force the text box to show the new value
+      updateTextInput(session, "ov_freq", value = input$direct_freq)
+    })
+    
     observeEvent(input$close_edit, { rx_meds$selected_idx <- NULL })
     observeEvent(input$select_rx_card, { rx_meds$selected_idx <- input$select_rx_card })
-    observeEvent(input$del_rx_idx, { rx_meds$df <- rx_meds$df[-input$del_rx_idx, ]; rx_meds$selected_idx <- NULL })
+    observeEvent(input$del_rx_idx, {
+      # 1. Capture the index to delete
+      idx_to_remove <- as.numeric(input$del_rx_idx)
+      req(idx_to_remove)
+      
+      # 2. Use isolate to prevent the UI from flickering mid-process
+      isolate({
+        if (nrow(rx_meds$df) >= idx_to_remove) {
+          # Clear selection first to prevent "operator invalid for atomic vectors" 
+          # errors if the UI tries to render an edit box for a deleted row
+          rx_meds$selected_idx <- NULL 
+          
+          # Remove the row
+          rx_meds$df <- rx_meds$df[-idx_to_remove, ]
+          
+          showNotification("Medication removed", type = "warning")
+        }
+      })
+    })
     
     # --- Rendering ---
     output$rx_search_results <- renderUI({
-      req(input$rx_q); if(nchar(input$rx_q) < 2) return(NULL)
-      matches <- rx_master() %>% filter(grepl(input$rx_q, brand_name, ignore.case=TRUE)) %>% head(5)
-      if(nrow(matches) == 0) return(actionButton(ns("add_custom_drug"), paste("Add New:", input$rx_q), class="btn btn-sm btn-warning w-100 mt-2"))
+      req(input$rx_q)
+      if(nchar(input$rx_q) < 2) return(NULL)
+      
+      # 1. Use explicit dplyr:: filter for the master list
+      matches <- rx_master() %>% 
+        dplyr::filter(grepl(input$rx_q, brand_name, ignore.case = TRUE)) %>% 
+        head(5)
+      
+      if(nrow(matches) == 0) {
+        return(actionButton(ns("add_custom_drug"), paste("Add New:", input$rx_q), 
+                            class="btn btn-sm btn-warning w-100 mt-2"))
+      }
+      
       lapply(1:nrow(matches), function(i) {
         d <- matches[i,]
-        actionButton(ns(paste0("ab_", i)), HTML(paste0("<b>", d$brand_name, "</b> <small>(", d$dose, ")</small>")), 
-                     class="btn btn-sm btn-outline-secondary w-100 mb-1 text-start", 
-                     onclick = sprintf("Shiny.setInputValue('%s', '%s')", ns("add_rx_id"), d$id))
+        
+        # 2. Fix: Use base R subsetting instead of the 'filter' function 
+        # to extract non-empty metadata strings
+        meta_vals <- c(d$dose, d$freq, d$route, d$duration)
+        meta_vals <- meta_vals[meta_vals != "" & !is.na(meta_vals)]
+        meta_sub  <- paste(meta_vals, collapse = " | ")
+        
+        actionButton(ns(paste0("ab_", i)), 
+                     HTML(paste0(
+                       "<div style='text-align:left;'>",
+                       "<div class='rx-brand-name' style='font-size:0.9rem;'>", d$brand_name, "</div>",
+                       "<div style='font-size: 0.75rem; color: #e67e22; font-weight:600;'>", meta_sub, "</div>",
+                       "</div>"
+                     )), 
+                     class="btn btn-sm btn-outline-secondary w-100 mb-1", 
+                     onclick = sprintf("Shiny.setInputValue('%s', '%s')", ns("add_rx_id"), d$id)
+        )
       })
     })
     
     observeEvent(input$add_rx_id, {
-      lib <- rx_master() %>% filter(id == input$add_rx_id)
-      row <- data.frame(brand_name=lib$brand_name[1], generic=lib$generic[1], dose=lib$dose[1], 
-                        freq=lib$freq[1], route="Oral", duration=lib$duration[1], stringsAsFactors=FALSE)
-      rx_meds$df <- clean_df(rbind(rx_meds$df, row))
-      rx_meds$selected_idx <- nrow(rx_meds$df); updateTextInput(session, "rx_q", value="")
+      lib <- rx_master() %>% dplyr::filter(id == input$add_rx_id)
+      req(nrow(lib) > 0)
+      
+      # Ensure NO NAs exist right at the moment of creation
+      new_row <- data.frame(
+        brand_name = as.character(lib$brand_name[1] %||% ""),
+        generic    = as.character(lib$generic[1] %||% ""),
+        dose       = as.character(lib$dose[1] %||% "1 TAB"), # Default if missing
+        freq       = as.character(lib$freq[1] %||% "OD"),
+        route      = as.character(lib$route[1] %||% "Oral"), 
+        duration   = as.character(lib$duration[1] %||% "Until next visit"),
+        stringsAsFactors = FALSE
+      )
+      
+      # Use isolate to prevent the Sync Observer from firing mid-addition
+      isolate({
+        current_df <- rx_meds$df
+        rx_meds$df <- clean_df(dplyr::bind_rows(current_df, new_row))
+        rx_meds$selected_idx <- nrow(rx_meds$df)
+      })
+      
+      updateTextInput(session, "rx_q", value="")
     })
     
     output$rx_list <- renderUI({
@@ -228,19 +395,70 @@ mobile_rx_server <- function(id, pool, current_pt, user_info) {
     # --- Persistence ---
     observeEvent(current_pt(), {
       req(current_pt()$id, pool)
-      res <- dbGetQuery(pool, "SELECT meds_json, visit_date FROM prescriptions WHERE patient_id::text = $1::text ORDER BY visit_date DESC LIMIT 1", list(as.character(current_pt()$id)))
+      # Force visit_date to DATE to strip time, ensuring we get today's record
+      res <- dbGetQuery(pool, 
+                        "SELECT meds_json, visit_date FROM prescriptions 
+         WHERE patient_id::text = $1::text 
+         AND visit_date IS NOT NULL
+         ORDER BY visit_date DESC NULLS LAST LIMIT 1", 
+                        list(as.character(current_pt()$id)))
+      
       if (nrow(res) > 0) {
-        rx_meta$history_date <- format(as.Date(res$visit_date[1]), "%Y-%m-%d"); rx_meta$is_history <- TRUE
+        rx_meta$history_date <- format(as.Date(res$visit_date[1]), "%Y-%m-%d")
+        rx_meta$is_history <- TRUE
+        # Use clean_df here to handle the conversion from JSON
         rx_meds$df <- clean_df(as.data.frame(jsonlite::fromJSON(res$meds_json[1])))
-      } else { rx_meta$is_history <- FALSE; rx_meds$df <- rx_meds$df[0,] }
+      } else { 
+        rx_meta$is_history <- FALSE
+        rx_meds$df <- rx_meds$df[0,] 
+      }
     })
     
     observeEvent(input$save_rx, {
-      req(current_pt())
-      json_data <- as.character(jsonlite::toJSON(rx_meds$df, auto_unbox = TRUE))
-      dbExecute(pool, "INSERT INTO prescriptions (patient_id, meds_json, visit_date) VALUES ($1, $2, $3) ON CONFLICT (patient_id, visit_date) DO UPDATE SET meds_json = EXCLUDED.meds_json", 
-                list(as.character(current_pt()$id), json_data, Sys.Date()))
-      showNotification("Saved")
+      req(current_pt(), current_pt()$id)
+      
+      # Final Sync
+      if (!is.null(rx_meds$selected_idx)) {
+        idx <- as.numeric(rx_meds$selected_idx)
+        if (idx > 0 && idx <= nrow(rx_meds$df)) {
+          if(!is.null(input$ov_dose))  rx_meds$df$dose[idx]     <- input$ov_dose
+          if(!is.null(input$ov_freq))  rx_meds$df$freq[idx]     <- input$ov_freq
+          if(!is.null(input$ov_route)) rx_meds$df$route[idx]    <- input$ov_route
+          if(!is.null(input$ov_dur))   rx_meds$df$duration[idx] <- input$ov_dur
+        }
+      }
+      
+      p_id <- as.character(current_pt()$id)
+      final_df <- clean_df(rx_meds$df)
+      
+      # CRITICAL: Force to character string to ensure DB accepts it as TEXT/JSON
+      json_text <- as.character(jsonlite::toJSON(final_df, auto_unbox = TRUE))
+      
+      # DEBUG: Check console to see if Thyronorm is in this string!
+      #message("Saving JSON: ", json_text) 
+      
+      tryCatch({
+        # We force the date to a plain DATE type to ensure the conflict triggers correctly
+        dbExecute(pool, 
+                  "INSERT INTO prescriptions (patient_id, meds_json, visit_date) 
+         VALUES ($1, $2, CURRENT_DATE) 
+         ON CONFLICT (patient_id, visit_date) 
+         DO UPDATE SET meds_json = EXCLUDED.meds_json", 
+                  list(p_id, json_text) # Note: Only 2 parameters now, SQL handles the date
+        )
+        
+        rx_meds$selected_idx <- NULL
+        save_count(save_count() + 1)
+        showNotification("Prescription Saved Successfully", type = "message")
+        
+      }, error = function(e) {
+        message("Database Save Error: ", e$message)
+        showNotification(paste("Save Failed:", e$message), type = "error")
+      })
     })
+    
+    return(list(
+      saved = reactive({ save_count() }) 
+    ))
   })
 }

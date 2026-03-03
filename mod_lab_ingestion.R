@@ -53,6 +53,7 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
       
     extracted_data <- reactiveVal(data.frame())
     debug_logs     <- reactiveVal("System Ready. Waiting for upload...")
+    save_count     <- reactiveVal(0)
     
     output$debug_console <- renderPrint({ cat(debug_logs()) })
     
@@ -428,6 +429,7 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
           msg <- paste0("Saved ", nrow(upload_queue), " record(s).",
                         if (!audit_ok) " [Audit log failed — check server logs]" else "")
           showNotification(msg, type = if (audit_ok) "message" else "warning")
+          save_count(save_count() + 1)
           extracted_data(data.frame())
           
         } else {
@@ -447,5 +449,7 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
       extracted_data(data.frame())
       debug_logs("Cleared. Ready for next upload.")
     })
+
+    return(list(saved = reactive({ save_count() })))
   })
 }

@@ -112,12 +112,12 @@ secure_ui_contents <- function() {
     
     nav_spacer(),
     
-    nav_panel("Reg", registration_ui("reg_mod")),
+    nav_panel("Demographics", registration_ui("reg_mod")),
     nav_panel("Notes", clinical_ui("clin_mod")),
-    nav_panel("Rx", mobile_rx_ui("rx_mod")),
+    nav_panel("Prescriptions", mobile_rx_ui("rx_mod")),
     nav_panel("Labs", lab_flowsheet_ui("lab_mod", lab_config)),
-    nav_panel("AI Ingest", lab_ingestion_ui("lab_ingest_mod")),
-    nav_panel("Timeline", timeline_ui("pt_timeline")),
+    nav_panel("Upload Labs", lab_ingestion_ui("lab_ingest_mod")),
+    nav_panel("Summary", timeline_ui("pt_timeline")),
     
     nav_menu(
       title = "More",
@@ -131,18 +131,12 @@ ui <- uiOutput("root_layout")
 
 # 3. Server Logic
 server <- function(input, output, session) {
-  current_pt <- reactiveVal(NULL)
-  
-  refresh_timeline <- reactiveVal(0)
-  
-  # 2. Increment it whenever a save happens in another moduleglobal
-  observeEvent(input$save_visit_button, {
-    refresh_timeline(refresh_timeline() + 1)
-  })
-  
+  current_pt  <- reactiveVal(NULL)
+  refresh_val <- reactiveVal(0)
+
   db_available <- reactive({ !is.null(pool) && inherits(pool, "Pool") })
   auth <- auth_server("auth_mod", pool)
-  
+
   # Reactive UI Switcher
   output$root_layout <- renderUI({
     if (!db_available()) {
@@ -156,31 +150,37 @@ server <- function(input, output, session) {
         )
       ))
     }
-    
+
     if (auth$is_logged()) {
       secure_ui_contents()
     } else {
       fluidPage(theme = bs_theme(version = 5, primary = "#26A69A"), auth_ui("auth_mod"))
     }
   })
-  
-  refresh_val <- reactiveVal(0)
+
   # CRITICAL: Initialize module servers ONLY after login
   observeEvent(auth$is_logged(), {
     req(auth$is_logged())
-    
-    registration_server("reg_mod", pool, current_pt, auth$user_info)
-    clinical_server("clin_mod", pool, current_pt, auth$user_info)
-    lab_flowsheet_server("lab_mod", pool, current_pt, lab_targets_raw, reactive(input$main_nav), auth$user_info)
-    lab_ingestion_server(
-      id = "lab_ingest_mod", 
-      pool = pool, 
-      current_pt = current_pt, 
-      user_info = auth$user_info, 
-      lab_targets = lab_targets_raw # This maps 'lab_targets_raw' to 'lab_targets'
-    )
-    mobile_rx_server("rx_mod", pool, current_pt, auth$user_info)
-    timeline_server("pt_timeline", pool, current_pt, refresh_trigger = reactive(refresh_val()))
+
+    reg_logic        <- registration_server("reg_mod", pool, current_pt, auth$user_info)
+    clin_logic       <- clinical_server("clin_mod", pool, current_pt, auth$user_info)
+    rx_logic         <- mobile_rx_server("rx_mod", pool, current_pt, auth$user_info)
+    lab_flow_logic   <- lab_flowsheet_server("lab_mod", pool, current_pt, lab_targets_raw,
+                                             reactive(input$main_nav), auth$user_info)
+    lab_ingest_logic <- lab_ingestion_server("lab_ingest_mod", pool, current_pt,
+                                             auth$user_info, lab_targets_raw)
+
+    # Refresh timeline whenever any module successfully saves data.
+    # Pass refresh_val directly (not wrapped in reactive()) — creating reactive()
+    # inside observeEvent is an anti-pattern that silently breaks invalidation.
+    observeEvent(clin_logic$saved(),       { refresh_val(refresh_val() + 1) }, ignoreInit = TRUE)
+    observeEvent(rx_logic$saved(),         { refresh_val(refresh_val() + 1) }, ignoreInit = TRUE)
+    observeEvent(lab_flow_logic$saved(),   { refresh_val(refresh_val() + 1) }, ignoreInit = TRUE)
+    observeEvent(lab_ingest_logic$saved(), { refresh_val(refresh_val() + 1) }, ignoreInit = TRUE)
+
+    timeline_server("pt_timeline", pool = pool, current_pt = current_pt,
+                    refresh_trigger = refresh_val)
+
     user_management_server("user_mgmt", pool)
   })
   
@@ -233,6 +233,9 @@ server <- function(input, output, session) {
   })
   
   output$logout_btn_ui <- renderUI({ req(auth$is_logged()); logout_ui("auth_mod") })
+  
+  # 2. Centralized Global Refresh
+  
   
   output$admin_panel_ui <- renderUI({
     req(auth$is_logged())

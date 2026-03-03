@@ -150,46 +150,68 @@ timeline_server <- function(id, pool, current_pt, refresh_trigger = reactive(0))
         }
       }
       
+      # Pre-compute the globally latest prescription (sorted DESC by date in SQL,
+      # so row 1 is always the most recent record).
+      latest_rx_df <- NULL
+      if (!is.null(data$rx) && nrow(data$rx) > 0) {
+        rx_sorted <- data$rx[order(data$rx$v_date, decreasing = TRUE), ]
+        latest_rx_df <- tryCatch(jsonlite::fromJSON(rx_sorted$meds_json[1]), error = function(e) NULL)
+        if (!is.data.frame(latest_rx_df) || nrow(latest_rx_df) == 0) latest_rx_df <- NULL
+      }
+
       # 3. Generate Timeline Cards
       tagList(
         lapply(1:nrow(data$visits), function(i) {
           # --- INITIALIZE VARIABLES (Prevents 'Object Not Found') ---
           v_json <- list(vitals = list(bp="-", hr="-", weight="-"), clinic_notes = "No notes.")
           rx_ui <- div(class="p-2 text-muted", "None recorded.")
-          
+
           # Extract this specific row
           this_visit <- data$visits[i, ]
           raw_v_date <- this_visit$v_date
-          
+
           # Safe Date Formatting for Header
           clean_v_date <- tryCatch(format(as.Date(raw_v_date), "%d %b %Y"), error = function(e) as.character(raw_v_date))
-          
+
           # Parse Vitals/Notes JSON
           if (!is.na(this_visit$visit_json) && this_visit$visit_json != "") {
             v_json_parsed <- tryCatch(jsonlite::fromJSON(this_visit$visit_json, simplifyVector = FALSE), error = function(e) NULL)
             if(!is.null(v_json_parsed)) v_json <- v_json_parsed
           }
-          
-          # Prescription Logic
-          if (!is.null(data$rx) && nrow(data$rx) > 0) {
-            day_rx <- data$rx[which(data$rx$v_date == raw_v_date), ]
-            if (nrow(day_rx) > 0) {
-              m_df <- tryCatch(jsonlite::fromJSON(day_rx$meds_json[1]), error = function(e) NULL)
-              if (is.data.frame(m_df) && nrow(m_df) > 0) {
-                rx_ui <- tags$table(class="rx-table border",
-                                    tags$thead(tags$tr(tags$th("Brand"), tags$th("Generic"), tags$th("Dose"), tags$th("Freq"), tags$th("Route"), tags$th("Dur"))),
-                                    tags$tbody(lapply(1:nrow(m_df), function(j) {
-                                      row_vals <- as.character(m_df[j, ])
-                                      translated <- sapply(row_vals, function(cell) {
-                                        clean <- trimws(cell); if (!is.null(f_map) && clean %in% names(f_map)) return(unname(f_map[clean])); return(cell)
-                                      })
-                                      tags$tr(
-                                        tags$td(strong(translated[1])), tags$td(span(translated[2], style="font-size:0.75rem; color:#666")),
-                                        tags$td(translated[3]), tags$td(span(class="freq-badge", translated[4])),
-                                        tags$td(translated[5]), tags$td(if(length(translated)>=6) translated[6] else "-")
-                                      )
-                                    }))
+
+          # Prescription Logic:
+          # Try exact date match first; for the most recent visit (i == 1) fall back
+          # to the globally latest prescription so newly saved Rx always shows.
+          build_rx_table <- function(m_df) {
+            tags$table(class="rx-table border",
+              tags$thead(tags$tr(tags$th("Brand"), tags$th("Generic"), tags$th("Dose"), tags$th("Freq"), tags$th("Route"), tags$th("Dur"))),
+              tags$tbody(lapply(1:nrow(m_df), function(j) {
+                row_vals   <- as.character(m_df[j, ])
+                translated <- sapply(row_vals, function(cell) {
+                  clean <- trimws(cell)
+                  if (!is.null(f_map) && clean %in% names(f_map)) return(unname(f_map[clean]))
+                  return(cell)
+                })
+                tags$tr(
+                  tags$td(strong(translated[1])), tags$td(span(translated[2], style="font-size:0.75rem; color:#666")),
+                  tags$td(translated[3]), tags$td(span(class="freq-badge", translated[4])),
+                  tags$td(translated[5]), tags$td(if(length(translated)>=6) translated[6] else "-")
                 )
+              }))
+            )
+          }
+
+          if (!is.null(data$rx) && nrow(data$rx) > 0) {
+            if (i == 1 && !is.null(latest_rx_df)) {
+              # Most recent visit always shows the latest prescription regardless of date,
+              # so a med added between visits still appears here.
+              rx_ui <- build_rx_table(latest_rx_df)
+            } else {
+              # Older visits: show the prescription saved on that exact visit date
+              day_rx <- data$rx[which(data$rx$v_date == raw_v_date), ]
+              if (nrow(day_rx) > 0) {
+                m_df <- tryCatch(jsonlite::fromJSON(day_rx$meds_json[1]), error = function(e) NULL)
+                if (is.data.frame(m_df) && nrow(m_df) > 0) rx_ui <- build_rx_table(m_df)
               }
             }
           }

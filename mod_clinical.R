@@ -143,6 +143,7 @@ clinical_ui <- function(id) {
 clinical_server <- function(id, pool, current_pt, user_info) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
+    save_count <- reactiveVal(0)
     
     # --- Reactive States ---
     refresh_visits <- reactiveVal(0)
@@ -351,6 +352,7 @@ clinical_server <- function(id, pool, current_pt, user_info) {
         removeModal()
         is_locked(TRUE)
         refresh_visits(refresh_visits() + 1)
+        save_count(save_count() + 1)
         showNotification("Record and Global PMHx Saved.", type = "message")
       }, error = function(e) { showNotification(paste("Save Error:", e$message), type = "error") })
     }
@@ -463,5 +465,10 @@ clinical_server <- function(id, pool, current_pt, user_info) {
         paste("Viewing Record:", note_state$active_visit_date)
       }
     })
+    
+    return(list(
+      saved = reactive({ save_count() })
+    ))
+    
   })
 }
