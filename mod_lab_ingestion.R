@@ -111,7 +111,18 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
       "  'unit'       : the unit string (e.g. 'mg/dL'), or null if absent\n",
       "  'value_text' : the raw result string exactly as printed (always populated)\n",
       "  'test_date'  : the date the specimen was collected or resulted, in YYYY-MM-DD format, or null\n",
-      "Do not invent values. If a field is absent from the report, use null."
+      "Do not invent values. If a field is absent from the report, use null.\n",
+      "CRITICAL RULES:\n",
+      "1. Serum/blood creatinine and urine creatinine are DIFFERENT tests. ",
+      "   Blood creatinine (typical units: mg/dL or umol/L, typical values 0.5-10) maps to 'Creatinine'. ",
+      "   Urine creatinine (typical units: mmol/L or mg/dL in urine section) maps to 'Urine Creatinine'. ",
+      "   Never map a urine-section creatinine value to 'Creatinine'.\n",
+      "2. When both a urine protein-creatinine ratio (PCR/UPCR) AND individual urine protein are present, ",
+      "   extract only the ratio as 'Urine Protein Creatinine Ratio (UPCR)'. Skip standalone urine protein.\n",
+      "3. When both a urine albumin-creatinine ratio (ACR/UACR/mACR) AND individual urine albumin are present, ",
+      "   extract only the ratio as 'Urine Microalbumin Creatinine Ratio (UMACR)'. Skip standalone urine albumin.\n",
+      "4. Context matters: look at section headings (e.g. 'URINE EXAMINATION', 'BIOCHEMISTRY') to determine ",
+      "   whether a test result is from urine or blood."
     )
     
     # ----------------------------------------------------------
@@ -156,16 +167,37 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
     # ----------------------------------------------------------
     clean_report_name <- function(name) {
       if (is.na(name) || nchar(trimws(name)) == 0) return(NA_character_)
-      # Remove common honorifics / titles
+
+      # 1. Remove honorifics
       name <- gsub("(?i)^(mr\\.?|mrs\\.?|ms\\.?|miss\\.?|dr\\.?|prof\\.?|rev\\.?|sir)\\s*",
                    "", name, perl = TRUE)
-      # Trim anything after a comma (age, DOB, or ID sometimes appended)
-      name <- sub(",.*$", "", name)
-      # Remove non-name characters (digits, brackets, slashes, etc.)
-      name <- gsub("[^A-Za-z\\s'\\-]", "", name)
-      # Collapse runs of whitespace
-      name <- gsub("\\s{2,}", " ", name)
-      trimws(name)
+
+      # 2. Insert a space before demographic keywords that OCR may have concatenated
+      #    directly onto the end of the name (e.g. "KRISHNAAgeGenderYsMale")
+      name <- gsub(
+        "(?i)(?<=[A-Za-z])(?=Age|Gender|Male|Female|Yr[s]?|Sex|D\\.?O\\.?B|Phone|Addr|Ward|Lab|Ref)",
+        " ", name, perl = TRUE
+      )
+
+      # 3. Truncate at the first demographic keyword (word-boundary aware)
+      name <- sub(
+        "(?i)\\s*\\b(age|gender|sex|male|female|yrs?|years?|d\\.?o\\.?b\\.?|phone|contact|address|ward|lab|ref|hosp)\\b.*$",
+        "", name, perl = TRUE
+      )
+
+      # 4. Remove after slash or comma (e.g. "25Y/M" or "Name, DOB")
+      name <- sub("[/,].*$", "", name)
+
+      # 5. Strip digits and non-name characters
+      name <- gsub("[^A-Za-z\\s'\\-\\.]", "", name)
+
+      # 6. Collapse whitespace
+      name <- trimws(gsub("\\s{2,}", " ", name))
+      if (nchar(name) == 0) return(NA_character_)
+
+      # 7. Title-case each word
+      name <- gsub("(^|\\s)(\\S)", "\\1\\U\\2", name, perl = TRUE)
+      name
     }
 
     # ----------------------------------------------------------
@@ -359,13 +391,15 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
           test_name = case_when(
             # Use AI-provided canonical name if it matches our list
             !is.na(test_name) & test_name %in% lab_targets$test_name ~ test_name,
-            
-            # Regex safety-net for common problem cases
-            grepl("albumin.*creatinine|\\bacr\\b", clean_name)         ~ "Urine Microalbumin Creatinine Ratio (UMACR)",
-            grepl("protein.*creatinine|\\bupcr\\b|\\bpcr\\b", clean_name) ~ "Urine Protein Creatinine Ratio (UPCR)",
-            grepl("albumin", clean_name) & grepl("urine", clean_name)  ~ "Urine Albumin",
+
+            # Ratios first — more specific, must be checked before individual components
+            grepl("albumin.*creatinine|creatinine.*albumin|\\bacr\\b|\\bumacr\\b|\\buacr\\b|\\bmacr\\b", clean_name) ~ "Urine Microalbumin Creatinine Ratio (UMACR)",
+            grepl("protein.*creatinine|creatinine.*protein|\\bupcr\\b|\\bpcr\\b", clean_name)                        ~ "Urine Protein Creatinine Ratio (UPCR)",
+
+            # Individual urine components (only when ratio not present)
+            grepl("albumin", clean_name) & grepl("urine", clean_name)    ~ "Urine Albumin",
             grepl("creatinine", clean_name) & grepl("urine", clean_name) ~ "Urine Creatinine",
-            
+
             TRUE ~ NA_character_   # Unknown → will be dropped by inner_join
           )
         ) %>%
