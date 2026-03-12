@@ -1,3 +1,5 @@
+options(shiny.fullstacktrace = TRUE)
+
 library(shiny)
 library(bslib)
 library(pool)
@@ -12,9 +14,12 @@ library(glue)
 library(rhandsontable)
 library(shinycssloaders)
 library(pdftools)
-try(library(sodium), silent = TRUE)
-try(library(RPostgres), silent = TRUE)
-try(library(base64enc), silent = TRUE)
+library(googleCloudStorageR)
+try(library(sodium),     silent = TRUE)
+try(library(RPostgres),  silent = TRUE)
+try(library(base64enc),  silent = TRUE)
+try(library(writexl),    silent = TRUE)
+try(library(googledrive), silent = TRUE)
 
 # 1. Load Configuration & Helpers
 source("helpers.R")
@@ -30,6 +35,34 @@ source("clinical_summary.R")
 # Load static data - Wrapped in try to prevent crash if file read fails
 lab_targets_raw <- read.csv("lab_targets.csv", stringsAsFactors = FALSE)
 lab_config <- split(lab_targets_raw$test_name, lab_targets_raw$category)
+
+# Frequency list — read ONCE at startup, shared with all modules.
+# CSV columns: code (col1), label (col2), category (col3).
+# Adding a new row to freq_list.csv is all that's needed to expose a new
+# frequency in the picker and in the clinical summary display.
+freq_list_raw <- tryCatch({
+  df <- read.csv("freq_list.csv", header = FALSE, stringsAsFactors = FALSE,
+                 col.names = c("code", "label", "category"))
+  df$code     <- toupper(trimws(df$code))
+  df$label    <- trimws(df$label)
+  df$category <- trimws(df$category)
+  df
+}, error = function(e) {
+  message("Warning: could not read freq_list.csv — ", e$message)
+  data.frame(code = character(), label = character(), category = character(),
+             stringsAsFactors = FALSE)
+})
+
+# Named vector  UPPERCASE_CODE → human-readable label  (clinical summary, Drive export)
+freq_label_map <- if (nrow(freq_list_raw) > 0)
+  setNames(freq_list_raw$label, freq_list_raw$code) else character(0)
+
+# Named list  category → character vector of UPPERCASE codes  (freq picker tabs)
+# OD codes are excluded — the OD tab uses a number grid, not a button list.
+freq_cats_list <- if (nrow(freq_list_raw) > 0)
+  lapply(split(freq_list_raw$code,
+               freq_list_raw$category)[setdiff(unique(freq_list_raw$category), "OD")],
+         identity) else list()
 
 # 2. Database Connection Logic
 pool <- tryCatch({
@@ -59,6 +92,70 @@ onStop(function() {
 openai_key <- Sys.getenv("OPENAI_API_KEY")
 if (nchar(openai_key) == 0) {
   message("Warning: OPENAI_API_KEY is missing. AI features will be disabled.")
+}
+
+# 3. PRESCRIPTION EXPORT
+#
+#    Two modes — whichever is configured wins (local takes priority for dev):
+#
+#    A) Local folder (dev/local only — Power Automate Desktop watches this folder):
+#         RX_OUTPUT_DIR = /path/to/local/folder
+#
+#    B) Google Cloud Storage (production on DigitalOcean):
+#         GCS_BUCKET                          = renaliq-prescriptions
+#         GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT = <full JSON as one-line string>  (DO)
+#         GOOGLE_SERVICE_ACCOUNT_JSON         = /path/to/sa.json                (local)
+#
+#       Power Automate Cloud watches the GCS bucket via the Google Cloud Storage
+#       connector and saves the file to a local watched folder for PAD to consume.
+
+# --- A: Local folder export (dev) ---
+rx_output_dir <- Sys.getenv("RX_OUTPUT_DIR")
+if (nchar(rx_output_dir) > 0) {
+  if (!dir.exists(rx_output_dir)) {
+    dir.create(rx_output_dir, recursive = TRUE)
+    message("Rx export: created local output folder — ", rx_output_dir)
+  } else {
+    message("Rx export: local folder ready — ", rx_output_dir)
+  }
+} else {
+  message("Rx export: RX_OUTPUT_DIR not set — local export disabled.")
+}
+
+# --- B: Google Cloud Storage export (production) ---
+gcs_enabled <- FALSE
+gcs_bucket  <- Sys.getenv("GCS_BUCKET")
+
+if (nchar(gcs_bucket) > 0 && requireNamespace("googleCloudStorageR", quietly = TRUE)) {
+  sa_json_content <- Sys.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT")
+  sa_json_path    <- Sys.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+  resolved_sa_path <- NULL
+
+  if (nchar(sa_json_content) > 0) {
+    tmp_sa <- tempfile(fileext = ".json")
+    writeLines(sa_json_content, tmp_sa)
+    resolved_sa_path <- tmp_sa
+    message("GCS: using service-account JSON from environment variable.")
+  } else if (nchar(sa_json_path) > 0 && file.exists(sa_json_path)) {
+    resolved_sa_path <- sa_json_path
+    message("GCS: using service-account JSON from file path.")
+  } else {
+    message("GCS: no credentials found — GCS export disabled.")
+  }
+
+  if (!is.null(resolved_sa_path)) {
+    tryCatch({
+      googleCloudStorageR::gcs_auth(json_file = resolved_sa_path)
+      gcs_enabled <- TRUE
+      message("GCS: authenticated — bucket: ", gcs_bucket)
+    }, error = function(e) {
+      message("GCS auth failed — GCS export disabled. Reason: ", e$message)
+    })
+  }
+} else if (nchar(gcs_bucket) == 0) {
+  message("GCS: GCS_BUCKET not set — GCS export disabled.")
+} else {
+  message("GCS: googleCloudStorageR package not installed — GCS export disabled.")
 }
 
 # --- Mobile Optimized UI ---
@@ -167,7 +264,12 @@ server <- function(input, output, session) {
 
     reg_logic        <- registration_server("reg_mod", pool, current_pt, auth$user_info)
     clin_logic       <- clinical_server("clin_mod", pool, current_pt, auth$user_info)
-    rx_logic         <- mobile_rx_server("rx_mod", pool, current_pt, auth$user_info)
+    rx_logic         <- mobile_rx_server("rx_mod", pool, current_pt, auth$user_info,
+                                         rx_output_dir     = rx_output_dir,
+                                         gcs_enabled       = gcs_enabled,
+                                         gcs_bucket        = gcs_bucket,
+                                         freq_cats         = freq_cats_list,
+                                         freq_label_map    = freq_label_map)
     lab_flow_logic   <- lab_flowsheet_server("lab_mod", pool, current_pt, lab_targets_raw,
                                              reactive(input$main_nav), auth$user_info)
     lab_ingest_logic <- lab_ingestion_server("lab_ingest_mod", pool, current_pt,
@@ -182,7 +284,7 @@ server <- function(input, output, session) {
     observeEvent(lab_ingest_logic$saved(), { refresh_val(refresh_val() + 1) }, ignoreInit = TRUE)
 
     timeline_server("pt_timeline", pool = pool, current_pt = current_pt,
-                    refresh_trigger = refresh_val)
+                    refresh_trigger = refresh_val, freq_label_map = freq_label_map)
 
     # Return values (daily_selected, followup_selected) reserved for future
     # cross-module navigation; discarded intentionally for now.

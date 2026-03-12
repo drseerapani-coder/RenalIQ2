@@ -18,11 +18,18 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Install R packages in layers
-# Added 'sodium' to the core layer
+# Core clinical + auth packages
 RUN R -e "install.packages(c('shiny', 'bslib', 'pool', 'DBI', 'RPostgres', \
     'dplyr', 'tidyr', 'lubridate', 'stringr', 'DT', 'shinyjs', \
     'rhandsontable', 'jsonlite', 'glue', 'pdftools', 'tesseract', \
     'httr', 'base64enc', 'shinycssloaders', 'sodium'), repos='https://cran.rstudio.com/')"
+
+# Prescription export: writexl for Excel + googleCloudStorageR for GCS upload
+# Service-account JSON is NOT baked into the image — inject at runtime via env var:
+#   GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT = <full JSON as a single-line string>
+#   GCS_BUCKET                          = renaliq-prescriptions
+RUN R -e "install.packages(c('writexl', 'googleCloudStorageR'), repos='https://cran.rstudio.com/')"
+
 # Note: 'openai' R package removed — AI calls now go through httr directly,
 # supporting both Ollama (local, default) and OpenAI (cloud fallback).
 

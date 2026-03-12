@@ -24,13 +24,8 @@ registration_server <- function(id, pool, current_pt_out, user_info) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     
-    save_trigger <- reactiveVal(0)
     # Track UI mode explicitly: "search" or "editor"
     pt_state <- reactiveValues(view_mode = "search")
-    # Local copy of the selected patient — drives the form directly so
-    # changes to the global current_pt_out() from other modules don't
-    # cause unwanted re-renders or stale-read issues on first selection.
-    selected_pt <- reactiveVal(NULL)
     
     # 1. Clear Search Button Logic
     output$clear_search_ui <- renderUI({
@@ -64,21 +59,14 @@ registration_server <- function(id, pool, current_pt_out, user_info) {
     # 3. Profile Editor Logic (The Form View)
     output$profile_panel_ui <- renderUI({
       if (pt_state$view_mode != "editor") return(NULL)
-
-      # Use selected_pt() — a local reactive set at the moment of row selection
-      # or "New Patient" click. This avoids the isolate() stale-read on first
-      # selection and shields the form from global current_pt_out() updates
-      # made by other modules while the user is mid-edit.
-      pt_raw <- selected_pt()
-      pt <- if (is.null(pt_raw)) list() else as.list(pt_raw)
       
+      pt <- isolate(current_pt_out()) %||% list()
       is_creating <- is.null(pt$id)
       
       card(
         class = "shadow-sm border-0 mt-2",
         card_header(class = "bg-dark text-white d-flex justify-content-between align-items-center", 
-                    # Now pt$first_name will safely return NULL instead of crashing
-                    if(is_creating || is.null(pt$first_name)) "New Registration" else paste("Edit:", pt$first_name),
+                    if(is_creating) "New Registration" else paste("Edit:", pt$first_name),
                     actionButton(ns("close_profile_top"), icon("times"), class = "btn-sm btn-outline-light")),
         card_body(
           class = "p-3",
@@ -124,14 +112,15 @@ registration_server <- function(id, pool, current_pt_out, user_info) {
       query_val <- paste0("%", q_text, "%")
       
       tryCatch({
-        DBI::dbGetQuery(pool, glue::glue_sql("
-          SELECT * FROM registrations 
-          WHERE (first_name ILIKE {query_val} OR last_name ILIKE {query_val} OR phone ILIKE {query_val} OR CAST(hospital_number AS TEXT) ILIKE {query_val})
-          ORDER BY updated_at DESC LIMIT 10
-        ", .con = pool))
-      }, error = function(e) { 
+        DBI::dbGetQuery(pool,
+          "SELECT * FROM registrations
+           WHERE (first_name ILIKE $1 OR last_name ILIKE $1 OR phone ILIKE $1
+                  OR CAST(hospital_number AS TEXT) ILIKE $1)
+           ORDER BY updated_at DESC LIMIT 10",
+          list(query_val))
+      }, error = function(e) {
         message("Search Error: ", e$message)
-        NULL 
+        NULL
       })
     })
     
@@ -150,167 +139,78 @@ registration_server <- function(id, pool, current_pt_out, user_info) {
       req(s)
       res <- isolate(search_results())
       req(nrow(res) >= s)
-
+      
       raw_row <- res[s, , drop = FALSE]
       clean_list <- setNames(lapply(as.list(raw_row), function(x) {
         if (is.list(x) || length(x) > 1) x[[1]] else x
       }), names(raw_row))
-
-      selected_pt(clean_list)      # drives the form immediately — no isolate() needed
-      current_pt_out(clean_list)   # updates the global patient for other modules
+      
+      current_pt_out(clean_list)
       pt_state$view_mode <- "editor"
     }, priority = 20)
     
     observeEvent(list(input$back_to_search, input$close_profile, input$close_profile_top), {
-      # Action buttons initialise at 0 when first rendered (NULL → 0 counts as
-      # a change and would fire this observer immediately, collapsing the form).
-      # Only proceed when at least one button has actually been clicked (value > 0).
-      btn_clicked <- isTRUE(input$back_to_search > 0) ||
-                     isTRUE(input$close_profile > 0) ||
-                     isTRUE(input$close_profile_top > 0)
-      req(btn_clicked)
       pt_state$view_mode <- "search"
     })
     
-    observeEvent(input$go_new_pt, {
-      selected_pt(NULL)        # blank form for new registration
+    observeEvent(input$go_new_pt, { 
       current_pt_out(NULL)
       pt_state$view_mode <- "editor"
     })
     
-    pending_pt_data <- reactiveVal(NULL)   # holds form data pending the duplicate-override decision
-
-    # --- Local helper: performs the actual DB write once duplicates are resolved ---
-    execute_save <- function(pid, d, curr_user) {
-      tryCatch({
-        if (!is.null(pid)) {
-          # --- UPDATE EXISTING PATIENT ---
-          DBI::dbExecute(pool,
-            "UPDATE registrations
-             SET first_name = $1, last_name = $2, dob = $3, gender = $4,
-                 phone = $5, address1 = $6, allergies = $7, comments = $8,
-                 hospital_number = $9, updated_at = NOW()
-             WHERE id = $10",
-            list(d$first_name, d$last_name, d$dob, d$gender,
-                 d$phone, d$address1, d$allergies, d$comments,
-                 d$hospital_number, as.integer(pid))
-          )
-          log_audit(pool, curr_user, "UPDATE", "registrations", as.character(pid))
-          showNotification("Patient record updated.", type = "message")
-          new_pid <- pid
-        } else {
-          # --- INSERT NEW PATIENT ---
-          new_pid <- DBI::dbGetQuery(pool,
-            "INSERT INTO registrations
-               (first_name, last_name, dob, gender, phone, address1,
-                allergies, comments, hospital_number, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
-             RETURNING id",
-            list(d$first_name, d$last_name, d$dob, d$gender,
-                 d$phone, d$address1, d$allergies, d$comments,
-                 d$hospital_number)
-          )$id
-          log_audit(pool, curr_user, "CREATE", "registrations", as.character(new_pid))
-          showNotification("New patient registered.", type = "message")
-        }
-
-        # Re-fetch the saved row and update both local and global state
-        updated <- as.list(DBI::dbGetQuery(pool,
-          "SELECT * FROM registrations WHERE id = $1", list(as.integer(new_pid)))[1, ])
-        selected_pt(updated)
-        current_pt_out(updated)
-        save_trigger(save_trigger() + 1)
-
-      }, error = function(e) {
-        showNotification(paste("Save Error:", e$message), type = "error")
-        message("Registration Save Error: ", e$message)
-      })
-    }
-
-    # 7. Database Save Logic
+    # 7. Database Save Logic (Adapted to bypass .with_conn scope issue)
     observeEvent(input$save_pt, {
-      req(input$first_name, input$dob, user_info())
-
-      clean_dob <- as.character(input$dob)
-      pid       <- selected_pt()$id   # NULL for new patients
+      req(input$first_name, input$phone, user_info()) 
+      pt <- isolate(current_pt_out())
+      is_new <- is.null(pt$id)
       curr_user <- user_info()$username
-
-      form_data <- list(
-        first_name      = trimws(input$first_name),
-        last_name       = trimws(input$last_name),
-        dob             = clean_dob,
-        gender          = input$gender,
-        phone           = trimws(input$phone),
-        address1        = input$address1,
-        allergies       = input$allergies,
-        comments        = input$comments,
-        hospital_number = trimws(input$hospital_number)
-      )
-
-      # Duplicate check — only for new registrations, not updates
-      if (is.null(pid)) {
-        dups <- tryCatch(
-          DBI::dbGetQuery(pool,
-            "SELECT id, first_name, last_name, dob, phone, hospital_number
-               FROM registrations
-              WHERE (LOWER(TRIM(first_name)) = LOWER($1) AND LOWER(TRIM(last_name)) = LOWER($2))
-                 OR (LENGTH($3) > 0 AND TRIM(phone) = $3 AND LOWER(TRIM(last_name)) = LOWER($2))
-              LIMIT 5",
-            list(form_data$first_name, form_data$last_name, form_data$phone)
-          ),
-          error = function(e) { message("Duplicate check error: ", e$message); data.frame() }
-        )
-
-        if (nrow(dups) > 0) {
-          pending_pt_data(c(form_data, list(curr_user = curr_user)))
-
-          dup_rows <- lapply(1:nrow(dups), function(i) {
-            d <- dups[i, ]
-            tags$li(class = "mb-1",
-              tags$strong(paste(d$first_name, d$last_name)),
-              paste0(
-                " | DOB: ", as.character(d$dob),
-                " | Phone: ", if (!is.na(d$phone) && nchar(trimws(d$phone)) > 0) d$phone else "—",
-                if (!is.na(d$hospital_number) && nchar(trimws(d$hospital_number)) > 0)
-                  paste0(" | UHID: ", d$hospital_number) else ""
-              )
-            )
-          })
-
-          showModal(modalDialog(
-            title = tags$h4(class = "text-warning", icon("exclamation-triangle"),
-                            " Possible Duplicate Patient"),
-            p("The following existing record(s) may already represent this patient:"),
-            tags$ul(dup_rows),
-            p(class = "text-muted small mt-2",
-              "If this is genuinely a different person, click 'Register Anyway'. ",
-              "Otherwise click 'Cancel' and select the existing record to update it."),
-            footer = tagList(
-              modalButton("Cancel — Select Existing"),
-              actionButton(ns("force_register"), "Register Anyway",
-                           class = "btn-warning fw-bold")
-            ),
-            easyClose = FALSE
-          ))
-          return()
+      
+      # Step A: Checkout connection manually
+      con <- pool::poolCheckout(pool)
+      
+      # Step B: Ensure it's returned no matter what happens
+      on.exit(pool::poolReturn(con), add = TRUE)
+      
+      tryCatch({
+        if (is_new) {
+          # INSERT NEW
+          res <- DBI::dbGetQuery(con,
+            "INSERT INTO registrations (hospital_number, first_name, last_name, dob, gender, phone, address1, allergies, comments, created_by)
+             VALUES ($1, $2, $3, $4::DATE, $5, $6, $7, $8, $9, $10)
+             RETURNING id",
+            list(input$hospital_number, input$first_name, input$last_name,
+                 as.character(input$dob), input$gender, input$phone,
+                 input$address1, input$allergies, input$comments, curr_user))
+          target_id <- res$id
+          if(exists("log_audit")) log_audit(con, curr_user, "CREATE", "registrations", target_id)
+        } else {
+          # UPDATE EXISTING
+          target_id <- pt$id
+          DBI::dbExecute(con,
+            "UPDATE registrations SET
+               hospital_number=$1, first_name=$2, last_name=$3,
+               dob=$4::DATE, gender=$5, phone=$6, address1=$7,
+               allergies=$8, comments=$9,
+               updated_by=$10, updated_at=NOW()
+             WHERE id = $11",
+            list(input$hospital_number, input$first_name, input$last_name,
+                 as.character(input$dob), input$gender, input$phone,
+                 input$address1, input$allergies, input$comments,
+                 curr_user, target_id))
+          if(exists("log_audit")) log_audit(con, curr_user, "UPDATE", "registrations", target_id)
         }
-      }
-
-      execute_save(pid, form_data, curr_user)
+        
+        # Refresh global patient object
+        updated_df <- DBI::dbGetQuery(con, "SELECT * FROM registrations WHERE id = $1", list(target_id))
+        updated_list <- setNames(lapply(as.list(updated_df[1,,drop=F]), function(x) x[[1]]), names(updated_df))
+        
+        current_pt_out(updated_list)
+        pt_state$view_mode <- "search" 
+        showNotification("Record Saved Successfully", type = "message")
+        
+      }, error = function(e) { 
+        showNotification(paste("Database Error:", e$message), type = "error") 
+      })
     })
-
-    # Override: user confirmed this is genuinely a new patient — proceed with INSERT
-    observeEvent(input$force_register, {
-      req(pending_pt_data())
-      p <- pending_pt_data()
-      removeModal()
-      execute_save(NULL, p, p$curr_user)
-      pending_pt_data(NULL)
-    })
-    
-    return(list(
-      saved = reactive({ save_trigger() })
-    ))
-    
   })
 }

@@ -1,57 +1,58 @@
-1in120,Once in 4 months
-1in14,Once in 14 days
-1in21,Once every 3 weeks
-1in42,Once every 6 weeks
-1in180,Once in 6 months
-1in60,Once in 2 months
-1in90,Once in 3 months
-5xd,5 times a day
-6xd,6 times a day
-alt,Alternate days
-bd10,10AM  - 10PM
-bd8,8AM  - 8PM
-diuretic,8AM  - 2PM
-bd1422,2PM-10PM
-flu,Annually
-friw,Every Friday
-hepb,0 - 1 - 2  - 6 months
-monthly,Monthly once
-mon,Every Monday
-tue,Every Tuesday
-wed,Every Wednesday
-thu,Every Thursday
-fri,Every Friday
-sat,Every Saturday
-sun,Every Sunday
-mwf,Mon - Wed - Fri
-od10,10AM
-od11,11AM
-od12,12PM
-od13,1PM
-od14,2PM
-od15,3PM
-od16,4PM
-od17,5PM
-od18,6PM
-od19,7PM
-od20,8PM
-od21,9PM
-od22,10PM
-od23,11PM
-od24,12AM
-od1,1AM
-od2,2AM
-od3,3AM
-od4,4AM
-od5,5AM
-od6,6AM
-od7,7AM
-od8,8AM
-od9,9AM
-qid,6AM - 12PM - 6PM  - 10PM
-rtx,Two doses two weeks apart
-stat,Only once
-tds,8AM - 2PM  - 10PM
-tid,8AM - 2PM  - 10PM
-tts,Tue - Thu - Sat
-weekly,Weekly once
+1in120,Once in 4 months,Misc
+1in14,Once in 14 days,Misc
+1in21,Once every 3 weeks,Misc
+1in42,Once every 6 weeks,Misc
+1in180,Once in 6 months,Misc
+1in60,Once in 2 months,Misc
+1in90,Once in 3 months,Misc
+5xd,5 times a day,TDS/QID
+6xd,6 times a day,TDS/QID
+alt,Alternate days,Misc
+bd10,10AM - 10PM,BD
+bd8,8AM - 8PM,BD
+diuretic,8AM - 2PM,BD
+bd1422,2PM - 10PM,BD
+flu,Annually,Misc
+friw,Every Friday,Misc
+hepb,0 - 1 - 2 - 6 months,Misc
+monthly,Monthly once,Misc
+mon,Every Monday,Days
+tue,Every Tuesday,Days
+wed,Every Wednesday,Days
+thu,Every Thursday,Days
+fri,Every Friday,Days
+sat,Every Saturday,Days
+sun,Every Sunday,Days
+mwf,Mon - Wed - Fri,Days
+od10,10AM,OD
+od11,11AM,OD
+od12,12PM,OD
+od13,1PM,OD
+od14,2PM,OD
+od15,3PM,OD
+od16,4PM,OD
+od17,5PM,OD
+od18,6PM,OD
+od19,7PM,OD
+od20,8PM,OD
+od21,9PM,OD
+od22,10PM,OD
+od23,11PM,OD
+od24,12AM,OD
+od1,1AM,OD
+od2,2AM,OD
+od3,3AM,OD
+od4,4AM,OD
+od5,5AM,OD
+od6,6AM,OD
+od7,7AM,OD
+od8,8AM,OD
+od9,9AM,OD
+prn,As needed,TDS/QID
+qid,6AM - 12PM - 6PM - 10PM,TDS/QID
+rtx,Two doses two weeks apart,Misc
+stat,Only once,TDS/QID
+tds,8AM - 2PM - 10PM,TDS/QID
+tid,8AM - 2PM - 10PM,TDS/QID
+tts,Tue - Thu - Sat,Days
+weekly,Weekly once,Misc

@@ -47,7 +47,7 @@ clinical_ui <- function(id) {
                       numericInput(ns("v_hr"), "Pulse", value = NA),
                       numericInput(ns("v_weight"), "Weight (kg)", value = NA),
                       textInput(ns("v_temp"), "Temp", placeholder = "98.4"),
-                      dateInput(ns("v_followup"), "Follow-up", value = Sys.Date())
+                      dateInput(ns("v_followup"), "Follow-up", value = NA)
                     ),
                     tags$hr(style = "margin: 20px 0; border-top: 2px solid #eee;"),
                     layout_column_wrap(
@@ -110,7 +110,7 @@ clinical_server <- function(id, pool, current_pt, user_info) {
       updateTextInput(session, "v_bp", value = ""); updateNumericInput(session, "v_hr", value = NA)
       updateNumericInput(session, "v_weight", value = NA); updateTextInput(session, "v_temp", value = "")
       updateTextAreaInput(session, "clinic_notes", value = "")
-      updateDateInput(session, "v_followup", value = Sys.Date())
+      updateDateInput(session, "v_followup", value = NA)
     }
     
     observe({ 
@@ -211,9 +211,15 @@ clinical_server <- function(id, pool, current_pt, user_info) {
       tryCatch({
         poolWithTransaction(pool, function(con) {
           if (is.null(note_state$active_visit_id)) {
-            dbExecute(con, glue_sql("INSERT INTO visitsmodule (patient_id, visit_date, visit_json, created_by, updated_at) VALUES ({as.integer(current_pt()$id)}, CURRENT_DATE, {json_data}, {user_info()$username}, NOW())", .con = con))
+            dbExecute(con,
+              "INSERT INTO visitsmodule (patient_id, visit_date, visit_json, created_by, updated_at)
+               VALUES ($1, CURRENT_DATE, $2, $3, NOW())",
+              list(as.integer(current_pt()$id), as.character(json_data), user_info()$username))
           } else {
-            dbExecute(con, glue_sql("UPDATE visitsmodule SET visit_json = {json_data}, updated_by = {user_info()$username}, updated_at = NOW() WHERE id = {as.integer(note_state$active_visit_id)}", .con = con))
+            dbExecute(con,
+              "UPDATE visitsmodule SET visit_json = $1, updated_by = $2, updated_at = NOW()
+               WHERE id = $3",
+              list(as.character(json_data), user_info()$username, as.integer(note_state$active_visit_id)))
           }
         })
         showNotification("Visit Saved Successfully")

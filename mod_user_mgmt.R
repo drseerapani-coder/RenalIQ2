@@ -45,7 +45,30 @@ user_management_ui <- function(id) {
         )
       ),
 
-      # Tab 3: Clinical Note Review (The Split Panel)
+      # Tab 3: Drug Master Editor
+      nav_panel(
+        title = "Drug Master",
+        card(
+          card_header(
+            div(class = "d-flex justify-content-between align-items-center",
+                span(icon("database"), " Drug Master List"),
+                div(
+                  actionButton(ns("refresh_drug_master"), "Refresh",
+                               class = "btn-outline-primary btn-sm me-2", icon = icon("sync")),
+                  actionButton(ns("save_drug_master"), "Save Changes",
+                               class = "btn-success btn-sm", icon = icon("save"))
+                )
+            )
+          ),
+          card_body(
+            helpText("Edit cells directly. Right-click a row to delete it. Save when done."),
+            rHandsontableOutput(ns("drug_master_table")) %>%
+              withSpinner(color = "#26A69A")
+          )
+        )
+      ),
+
+      # Tab 4: Clinical Note Review (The Split Panel)
       nav_panel(
         title = "Clinical Note Review",
         layout_column_wrap(
@@ -465,6 +488,156 @@ user_management_server <- function(id, pool) {
         tryCatch(DBI::dbExecute(con, "ROLLBACK"), error = function(e2) NULL)
         showNotification(paste("Merge error:", e$message), type = "error")
         message("Merge error: ", e$message)
+      })
+    })
+
+    # ============================================================
+    # 7. Drug Master Editor
+    # ============================================================
+    DRUG_COLS <- c("id", "brand_name", "generic", "dose", "freq", "route", "duration")
+
+    drug_master_rv <- reactiveVal(data.frame())
+
+    load_drug_master <- function() {
+      tryCatch({
+        df <- dbGetQuery(pool,
+          "SELECT id, brand_name, generic, dose, freq, route, duration
+             FROM drug_master ORDER BY brand_name ASC")
+        df$id <- as.character(df$id)
+        drug_master_rv(df)
+      }, error = function(e) {
+        showNotification(paste("Error loading drug master:", e$message), type = "error")
+      })
+    }
+
+    observe({ load_drug_master() })
+
+    observeEvent(input$refresh_drug_master, {
+      load_drug_master()
+      showNotification("Drug master reloaded.", type = "message")
+    })
+
+    output$drug_master_table <- renderRHandsontable({
+      df <- drug_master_rv()
+      req(nrow(df) >= 0)
+
+      delete_row_js <- htmlwidgets::JS(paste0("
+        function(key, options) {
+          var sel = this.getSelected();
+          if (!sel || sel.length === 0) return;
+          var row = sel[0][0];
+          var id  = this.getDataAtCell(row, 0);
+          Shiny.setInputValue('", ns("delete_drug_id"), "', id, {priority: 'event'});
+        }
+      "))
+
+      rhandsontable(df,
+                    rowHeaders  = FALSE,
+                    stretchH    = "all",
+                    width       = "100%",
+                    useTypes    = FALSE) %>%
+        hot_table(highlightCol = TRUE, highlightRow = TRUE) %>%
+        hot_col("id",          readOnly = TRUE, width = 60) %>%
+        hot_col("brand_name",  width = 160) %>%
+        hot_col("generic",     width = 160) %>%
+        hot_col("dose",        width = 100) %>%
+        hot_col("freq",        width = 80) %>%
+        hot_col("route",       width = 80) %>%
+        hot_col("duration",    width = 140) %>%
+        hot_context_menu(
+          allowRowEdit = TRUE,
+          allowColEdit = FALSE,
+          customOpts = list(
+            delete_drug_row = list(
+              name     = "Delete this drug",
+              callback = delete_row_js
+            )
+          )
+        )
+    })
+
+    # Confirm + execute row deletion
+    observeEvent(input$delete_drug_id, {
+      drug_id <- trimws(as.character(input$delete_drug_id))
+      req(nchar(drug_id) > 0)
+
+      df  <- drug_master_rv()
+      row <- df[df$id == drug_id, ]
+      if (nrow(row) == 0) return()
+
+      showModal(modalDialog(
+        title = tags$h5(icon("trash"), " Delete Drug"),
+        p("Permanently remove ", tags$strong(row$brand_name[1]),
+          " (", row$generic[1], ") from the master list?"),
+        p(class = "text-muted small", "This does not affect existing prescriptions."),
+        footer = tagList(
+          modalButton("Cancel"),
+          actionButton(ns("confirm_delete_drug"), "Delete",
+                       class = "btn-danger fw-bold",
+                       `data-drug-id` = drug_id)
+        ),
+        easyClose = TRUE
+      ))
+
+      # Store id for use in confirm observer
+      session$userData$pending_drug_delete <- drug_id
+    })
+
+    observeEvent(input$confirm_delete_drug, {
+      drug_id <- session$userData$pending_drug_delete
+      req(!is.null(drug_id))
+      tryCatch({
+        dbExecute(pool, "DELETE FROM drug_master WHERE id::text = $1", list(drug_id))
+        removeModal()
+        showNotification("Drug deleted.", type = "warning")
+        load_drug_master()
+      }, error = function(e) {
+        showNotification(paste("Delete error:", e$message), type = "error")
+      })
+      session$userData$pending_drug_delete <- NULL
+    })
+
+    # Save all inline edits back to DB
+    observeEvent(input$save_drug_master, {
+      req(input$drug_master_table)
+      edited_df <- hot_to_r(input$drug_master_table)
+
+      con <- poolCheckout(pool)
+      on.exit(poolReturn(con))
+
+      tryCatch({
+        DBI::dbExecute(con, "BEGIN")
+        n_updated <- 0L
+
+        for (i in seq_len(nrow(edited_df))) {
+          r <- edited_df[i, ]
+          DBI::dbExecute(con,
+            "UPDATE drug_master
+                SET brand_name = $2,
+                    generic    = $3,
+                    dose       = $4,
+                    freq       = $5,
+                    route      = $6,
+                    duration   = $7
+              WHERE id::text = $1",
+            list(as.character(r$id),
+                 trimws(as.character(r$brand_name)),
+                 trimws(as.character(r$generic)),
+                 trimws(as.character(r$dose)),
+                 trimws(as.character(r$freq)),
+                 trimws(as.character(r$route)),
+                 trimws(as.character(r$duration))))
+          n_updated <- n_updated + 1L
+        }
+
+        DBI::dbExecute(con, "COMMIT")
+        showNotification(paste0("Drug master saved (", n_updated, " records updated)."),
+                         type = "message")
+        load_drug_master()
+      }, error = function(e) {
+        DBI::dbExecute(con, "ROLLBACK")
+        showNotification(paste("Save error:", e$message), type = "error")
+        message("Drug master save error: ", e$message)
       })
     })
 

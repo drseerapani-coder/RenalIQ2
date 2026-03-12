@@ -14,8 +14,6 @@ lab_ingestion_ui <- function(id) {
             span(icon("microscope")))
       ),
       card_body(
-        uiOutput(ns("report_name_banner")),
-        uiOutput(ns("patient_banner")),
         fileInput(ns("file_input"), "Upload PDF or Image",
                   multiple = TRUE,
                   accept = c("image/png", "image/jpeg", "application/pdf")),
@@ -49,49 +47,16 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
       message("Critical Error: lab_targets is empty in Lab Ingestion Module")
       return(NULL)
     }
-
+    
+    # Generate the prompt inside the module server
+    all_test_names <- lab_targets$test_name
+      
     extracted_data <- reactiveVal(data.frame())
     debug_logs     <- reactiveVal("System Ready. Waiting for upload...")
-    save_count     <- reactiveVal(0)
-    report_names   <- reactiveVal(list())          # name(s) as printed on the uploaded PDF(s)
-
+    save_trigger   <- reactiveVal(0)
+    
     output$debug_console <- renderPrint({ cat(debug_logs()) })
-
-    # ----------------------------------------------------------
-    # Patient safety banner + file input gating
-    # ----------------------------------------------------------
-    output$patient_banner <- renderUI({
-      pt <- current_pt()
-
-      if (is.null(pt) || is.null(pt$id)) {
-        # No patient selected — show warning and disable upload
-        shinyjs::disable("file_input")
-        div(class = "alert alert-warning d-flex align-items-center gap-2 mb-3",
-            style = "font-size: 1rem;",
-            icon("triangle-exclamation"),
-            tags$strong("No patient selected."),
-            " Please select a patient from the Registration tab before uploading labs."
-        )
-      } else {
-        # Patient loaded — show confirmation banner and enable upload
-        shinyjs::enable("file_input")
-
-        dob_str  <- tryCatch(format(as.Date(as.character(pt$dob)), "%d %b %Y"), error = function(e) "—")
-        uhid_str <- if (!is.null(pt$hospital_number) && nchar(trimws(as.character(pt$hospital_number))) > 0)
-                      paste0(" | UHID: ", pt$hospital_number) else ""
-
-        div(class = "alert alert-success d-flex align-items-center gap-2 mb-3",
-            style = "font-size: 1rem;",
-            icon("circle-check"),
-            div(
-              tags$strong(paste("Uploading for:", pt$first_name, pt$last_name)),
-              tags$span(class = "text-muted ms-2",
-                        paste0("DOB: ", dob_str, uhid_str))
-            )
-        )
-      }
-    })
-
+    
     # ----------------------------------------------------------
     # Build the AI system prompt once, incorporating all known
     # canonical test names so the model maps to them directly.
@@ -111,18 +76,7 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
       "  'unit'       : the unit string (e.g. 'mg/dL'), or null if absent\n",
       "  'value_text' : the raw result string exactly as printed (always populated)\n",
       "  'test_date'  : the date the specimen was collected or resulted, in YYYY-MM-DD format, or null\n",
-      "Do not invent values. If a field is absent from the report, use null.\n",
-      "CRITICAL RULES:\n",
-      "1. Serum/blood creatinine and urine creatinine are DIFFERENT tests. ",
-      "   Blood creatinine (typical units: mg/dL or umol/L, typical values 0.5-10) maps to 'Creatinine'. ",
-      "   Urine creatinine (typical units: mmol/L or mg/dL in urine section) maps to 'Urine Creatinine'. ",
-      "   Never map a urine-section creatinine value to 'Creatinine'.\n",
-      "2. When both a urine protein-creatinine ratio (PCR/UPCR) AND individual urine protein are present, ",
-      "   extract only the ratio as 'Urine Protein Creatinine Ratio (UPCR)'. Skip standalone urine protein.\n",
-      "3. When both a urine albumin-creatinine ratio (ACR/UACR/mACR) AND individual urine albumin are present, ",
-      "   extract only the ratio as 'Urine Microalbumin Creatinine Ratio (UMACR)'. Skip standalone urine albumin.\n",
-      "4. Context matters: look at section headings (e.g. 'URINE EXAMINATION', 'BIOCHEMISTRY') to determine ",
-      "   whether a test result is from urine or blood."
+      "Do not invent values. If a field is absent from the report, use null."
     )
     
     # ----------------------------------------------------------
@@ -163,153 +117,18 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
     }
     
     # ----------------------------------------------------------
-    # Helper: strip titles, punctuation, and noise from an extracted name string
-    # ----------------------------------------------------------
-    clean_report_name <- function(name) {
-      if (is.na(name) || nchar(trimws(name)) == 0) return(NA_character_)
-
-      # 1. Remove honorifics
-      name <- gsub("(?i)^(mr\\.?|mrs\\.?|ms\\.?|miss\\.?|dr\\.?|prof\\.?|rev\\.?|sir)\\s*",
-                   "", name, perl = TRUE)
-
-      # 2. Insert a space before demographic keywords that OCR may have concatenated
-      #    directly onto the end of the name (e.g. "KRISHNAAgeGenderYsMale")
-      name <- gsub(
-        "(?i)(?<=[A-Za-z])(?=Age|Gender|Male|Female|Yr[s]?|Sex|D\\.?O\\.?B|Phone|Addr|Ward|Lab|Ref)",
-        " ", name, perl = TRUE
-      )
-
-      # 3. Truncate at the first demographic keyword (word-boundary aware)
-      name <- sub(
-        "(?i)\\s*\\b(age|gender|sex|male|female|yrs?|years?|d\\.?o\\.?b\\.?|phone|contact|address|ward|lab|ref|hosp)\\b.*$",
-        "", name, perl = TRUE
-      )
-
-      # 4. Remove after slash or comma (e.g. "25Y/M" or "Name, DOB")
-      name <- sub("[/,].*$", "", name)
-
-      # 5. Strip digits and non-name characters
-      name <- gsub("[^A-Za-z\\s'\\-\\.]", "", name)
-
-      # 6. Collapse whitespace
-      name <- trimws(gsub("\\s{2,}", " ", name))
-      if (nchar(name) == 0) return(NA_character_)
-
-      # 7. Title-case each word
-      name <- gsub("(^|\\s)(\\S)", "\\1\\U\\2", name, perl = TRUE)
-      name
-    }
-
-    # ----------------------------------------------------------
-    # Helper: extract the patient name as printed on the report.
-    # Scans the first max_header_lines lines for a "Patient Name:" type label
-    # and returns the value after it.  Returns NA_character_ if not found.
-    # ----------------------------------------------------------
-    extract_report_name <- function(text, max_header_lines = 30) {
-      lines <- unlist(strsplit(text, "\n"))
-      n_scan <- min(max_header_lines, length(lines))
-      header <- lines[seq_len(n_scan)]
-
-      # Match: "Patient Name:", "Patient:", "Pt Name:", "Full Name:", "Name:" etc.
-      name_pattern <- "(?i)(patient\\s*name|pt\\.?\\s*name|full\\s*name|patient)\\s*[:=—\\-]\\s*(.+)"
-
-      for (ln in header) {
-        m <- regmatches(ln, regexpr(name_pattern, ln, perl = TRUE))
-        if (length(m) > 0 && nchar(m) > 0) {
-          # Strip the label part; keep everything after the delimiter
-          name_val <- trimws(gsub("(?i)(patient\\s*name|pt\\.?\\s*name|full\\s*name|patient)\\s*[:=—\\-]\\s*",
-                                   "", m, perl = TRUE))
-          if (nchar(name_val) > 0) return(name_val)
-        }
-      }
-      NA_character_
-    }
-
-    # ----------------------------------------------------------
-    # Helper: strip PHI from the header section of a lab report text
-    # Scans only the first `max_header_lines` lines so results are untouched.
-    # Returns list(clean_text = "...", stripped_count = <int>)
-    # ----------------------------------------------------------
-    strip_phi_header <- function(text, max_header_lines = 30) {
-      lines <- unlist(strsplit(text, "\n"))
-      if (length(lines) == 0) return(list(clean_text = text, stripped_count = 0))
-
-      n_scan <- min(max_header_lines, length(lines))
-
-      # Regex: matches lines that contain a PHI label followed by a delimiter.
-      # Deliberately conservative — only fires when a recognisable label is present.
-      phi_pattern <- paste0(
-        "(?i)(",
-        paste(c(
-          "patient\\s*(name)?",    # Patient: / Patient Name:
-          "pt\\.?\\s*name",        # Pt Name:
-          "full\\s*name",
-          "date\\s*of\\s*birth",   # Date of Birth:
-          "d\\.?o\\.?b\\.?",       # DOB:
-          "birth\\s*date",
-          "sex", "gender",
-          "address", "addr\\.",
-          "phone", "tel\\.", "mobile", "contact\\s*no",
-          "m\\.?r\\.?n\\.?",                           # MRN:
-          "medical\\s*record",
-          "patient\\s*(id|no\\.?|number|#)",
-          "hospital\\s*(no\\.?|number|id)",
-          "uhid",
-          "registration\\s*(no\\.?|id)",
-          "nhs\\s*(number|no\\.?)",
-          "ordering\\s*(physician|provider|dr\\.?)?",
-          "referring\\s*(physician|provider|dr\\.?)?",
-          "requested\\s*by",
-          "clinician", "consultant",
-          "ward", "dept\\.", "department"
-        ), collapse = "|"),
-        ")\\s*[:=—\\-]"
-      )
-
-      is_phi            <- logical(length(lines))
-      is_phi[seq_len(n_scan)] <- grepl(phi_pattern, lines[seq_len(n_scan)], perl = TRUE)
-      stripped_count    <- sum(is_phi)
-      lines[is_phi]     <- ""   # blank the line; preserve line positions for context
-
-      list(clean_text = paste(lines, collapse = "\n"), stripped_count = stripped_count)
-    }
-
-    # ----------------------------------------------------------
-    # Helper: call AI API (Ollama local or OpenAI cloud fallback)
+    # Helper: call OpenAI API
     #   - text mode : standard chat completions with raw_text
     #   - image mode: vision API with base64-encoded image
-    #
-    # Environment variables:
-    #   AI_BACKEND      = "ollama" (default) | "openai"
-    #   OLLAMA_HOST     = "http://localhost:11434" (default)
-    #   OLLAMA_TEXT_MODEL  = "phi4"          (default)
-    #   OLLAMA_VISION_MODEL= "llama3.2-vision" (default)
-    #   OPENAI_API_KEY  = required only when AI_BACKEND=openai
     # ----------------------------------------------------------
     call_openai <- function(system_prompt, file_info) {
-      backend <- tolower(trimws(Sys.getenv("AI_BACKEND", unset = "openai")))
-
-      if (backend == "openai") {
-        # ---- Cloud: OpenAI ----
-        api_key <- Sys.getenv("OPENAI_API_KEY")
-        if (nchar(api_key) == 0) stop("OPENAI_API_KEY is not set.")
-        api_url  <- "https://api.openai.com/v1/chat/completions"
-        auth_hdr <- httr::add_headers(Authorization = paste("Bearer", api_key))
-        text_model   <- "gpt-4o-mini"
-        vision_model <- "gpt-4o"
-      } else {
-        # ---- Local: Ollama (OpenAI-compatible endpoint, no auth needed) ----
-        ollama_host  <- Sys.getenv("OLLAMA_HOST", unset = "http://localhost:11434")
-        api_url      <- paste0(ollama_host, "/v1/chat/completions")
-        auth_hdr     <- NULL   # Ollama requires no Authorization header
-        text_model   <- Sys.getenv("OLLAMA_TEXT_MODEL",   unset = "phi4")
-        vision_model <- Sys.getenv("OLLAMA_VISION_MODEL", unset = "llama3.2-vision")
-      }
-
+      api_key <- Sys.getenv("OPENAI_API_KEY")
+      if (nchar(api_key) == 0) stop("OPENAI_API_KEY environment variable is not set.")
+      
       if (!file_info$is_image) {
         # ---- Text / PDF mode ----
         body <- list(
-          model       = text_model,
+          model       = "gpt-4o-mini",
           temperature = 0,
           messages    = list(
             list(role = "system", content = system_prompt),
@@ -317,14 +136,14 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
           )
         )
       } else {
-        # ---- Image mode: vision model ----
+        # ---- Image mode: use gpt-4o vision ----
         img_bytes  <- readBin(file_info$path, "raw", n = file.info(file_info$path)$size)
         img_b64    <- base64enc::base64encode(img_bytes)
         ext        <- tolower(tools::file_ext(file_info$path))
         mime_type  <- if (ext == "png") "image/png" else "image/jpeg"
-
+        
         body <- list(
-          model       = vision_model,
+          model       = "gpt-4o",   # vision requires gpt-4o (not mini)
           temperature = 0,
           messages    = list(
             list(role = "system", content = system_prompt),
@@ -341,16 +160,16 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
           )
         )
       }
-
+      
       res <- httr::POST(
-        url    = api_url,
-        if (!is.null(auth_hdr)) auth_hdr,
-        body   = body,
-        encode = "json"
+        url     = "https://api.openai.com/v1/chat/completions",
+        httr::add_headers(Authorization = paste("Bearer", api_key)),
+        body    = body,
+        encode  = "json"
       )
-
+      
       if (httr::http_error(res)) {
-        stop(backend, " API error: ", httr::content(res, as = "text", encoding = "UTF-8"))
+        stop("OpenAI API error: ", httr::content(res, as = "text", encoding = "UTF-8"))
       }
       
       httr::content(res)$choices[[1]]$message$content
@@ -391,15 +210,13 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
           test_name = case_when(
             # Use AI-provided canonical name if it matches our list
             !is.na(test_name) & test_name %in% lab_targets$test_name ~ test_name,
-
-            # Ratios first — more specific, must be checked before individual components
-            grepl("albumin.*creatinine|creatinine.*albumin|\\bacr\\b|\\bumacr\\b|\\buacr\\b|\\bmacr\\b", clean_name) ~ "Urine Microalbumin Creatinine Ratio (UMACR)",
-            grepl("protein.*creatinine|creatinine.*protein|\\bupcr\\b|\\bpcr\\b", clean_name)                        ~ "Urine Protein Creatinine Ratio (UPCR)",
-
-            # Individual urine components (only when ratio not present)
-            grepl("albumin", clean_name) & grepl("urine", clean_name)    ~ "Urine Albumin",
+            
+            # Regex safety-net for common problem cases
+            grepl("albumin.*creatinine|\\bacr\\b", clean_name)         ~ "Urine Microalbumin Creatinine Ratio (UMACR)",
+            grepl("protein.*creatinine|\\bupcr\\b|\\bpcr\\b", clean_name) ~ "Urine Protein Creatinine Ratio (UPCR)",
+            grepl("albumin", clean_name) & grepl("urine", clean_name)  ~ "Urine Albumin",
             grepl("creatinine", clean_name) & grepl("urine", clean_name) ~ "Urine Creatinine",
-
+            
             TRUE ~ NA_character_   # Unknown → will be dropped by inner_join
           )
         ) %>%
@@ -429,54 +246,35 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
     # ----------------------------------------------------------
     observeEvent(input$file_input, {
       req(input$file_input, current_pt())
-
-      files        <- input$file_input
-      all_results  <- list()
-      logs         <- character(0)
-      found_names  <- list()   # {file, name} pairs extracted from PDF headers this batch
-
+      
+      files       <- input$file_input
+      all_results <- list()
+      logs        <- character(0)
+      
       withProgress(message = "AI Lab Extraction in Progress...", value = 0, {
         for (i in seq_len(nrow(files))) {
           incProgress(1 / nrow(files), detail = paste("File", i, "of", nrow(files)))
-
+          
           path      <- files$datapath[i]
           file_name <- files$name[i]
           mime      <- files$type[i]
-
+          
           logs <- c(logs, paste0("\n--- Processing: ", file_name, " ---"))
-
+          
           tryCatch({
             # Step 1: Extract text (or prepare image reference)
             file_info <- extract_text_from_file(path, mime)
-
+            
             if (!file_info$is_image) {
               char_count <- nchar(file_info$text)
               logs <- c(logs, paste("  Text extracted:", char_count, "characters"))
               if (char_count < 20) {
                 logs <- c(logs, "  WARNING: Very little text found. Check if PDF is scanned.")
               }
-
-              # Step 1b: Capture the patient name from the raw text BEFORE stripping
-              pdf_name_raw  <- extract_report_name(file_info$text)
-              pdf_name_clean <- clean_report_name(pdf_name_raw)
-              found_names <- c(found_names, list(list(
-                file = file_name,
-                name = if (!is.na(pdf_name_clean) && nchar(pdf_name_clean) > 0)
-                          pdf_name_clean else NA_character_
-              )))
-              logs <- c(logs, paste("  Name on report:",
-                                    if (!is.na(pdf_name_clean)) pdf_name_clean else "(not detected)"))
-
-              # Step 1c: Strip PHI header lines before sending to AI
-              phi_result     <- strip_phi_header(file_info$text)
-              file_info$text <- phi_result$clean_text
-              logs <- c(logs, paste("  PHI header stripping: blanked",
-                                    phi_result$stripped_count, "line(s) in top 30"))
             } else {
               logs <- c(logs, "  Image file detected. Using vision API.")
-              logs <- c(logs, "  NOTE: Image reports are sent as base64 — consider using Ollama vision locally for full PHI containment.")
             }
-
+            
             # Step 2: Call AI
             ai_raw <- call_openai(system_prompt, file_info)
             logs   <- c(logs, paste("  AI response length:", nchar(ai_raw), "chars"))
@@ -490,25 +288,14 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
             }
             
           }, error = function(e) {
-            err_msg <- e$message
-            logs <<- c(logs, paste("  ERROR:", err_msg))
-            message("Lab ingestion error on file ", file_name, ": ", err_msg)
-
-            # Surface AI connectivity errors immediately — don't bury them in the debug log
-            if (grepl("connect|11434|API|api_key|OPENAI", err_msg, ignore.case = TRUE)) {
-              showNotification(
-                paste0("AI connection error: ", err_msg,
-                       " — Check that OPENAI_API_KEY is set and AI_BACKEND=openai."),
-                type = "error", duration = 15
-              )
-            }
+            logs <<- c(logs, paste("  ERROR:", e$message))
+            message("Lab ingestion error on file ", file_name, ": ", e$message)
           })
         }
       })
       
       debug_logs(paste(logs, collapse = "\n"))
-      report_names(found_names)
-
+      
       final_df <- if (length(all_results) > 0) bind_rows(all_results) else data.frame()
       extracted_data(final_df)
       
@@ -549,32 +336,6 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
         )
     })
     
-    # ----------------------------------------------------------
-    # Report name confirmation banner (shown after extraction)
-    # ----------------------------------------------------------
-    output$report_name_banner <- renderUI({
-      pairs <- report_names()
-      if (length(pairs) == 0) return(NULL)
-
-      rows <- lapply(pairs, function(p) {
-        if (!is.na(p$name) && nchar(p$name) > 0) {
-          tags$li(tags$strong(style = "font-size: 1.05rem;", p$name))
-        } else {
-          tags$li(tags$em(class = "text-muted", "Name not detected — verify manually"))
-        }
-      })
-
-      div(class = "alert alert-warning d-flex align-items-start gap-2 mb-2 py-2",
-          icon("triangle-exclamation"),
-          div(
-            tags$strong("Name on report:"),
-            tags$ul(class = "mb-0 mt-1 ps-3", rows),
-            tags$small(class = "text-muted d-block mt-1",
-                       "Confirm this matches the selected patient before saving.")
-          )
-      )
-    })
-
     # ----------------------------------------------------------
     # Action buttons (shown only after extraction)
     # ----------------------------------------------------------
@@ -668,9 +429,9 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
           msg <- paste0("Saved ", nrow(upload_queue), " record(s).",
                         if (!audit_ok) " [Audit log failed — check server logs]" else "")
           showNotification(msg, type = if (audit_ok) "message" else "warning")
-          save_count(save_count() + 1)
+          save_trigger(save_trigger() + 1)
           extracted_data(data.frame())
-          
+
         } else {
           showNotification("No new records to save (all duplicates).", type = "warning")
         }
@@ -686,10 +447,9 @@ lab_ingestion_server <- function(id, pool, current_pt, user_info, lab_targets) {
     
     observeEvent(input$clear, {
       extracted_data(data.frame())
-      report_names(list())
       debug_logs("Cleared. Ready for next upload.")
     })
 
-    return(list(saved = reactive({ save_count() })))
+    return(list(saved = reactive(save_trigger())))
   })
 }

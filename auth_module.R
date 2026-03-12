@@ -19,11 +19,11 @@ logout_ui <- function(id) {
 auth_ui <- function(id) {
   ns <- NS(id)
   tagList(
-    tags$style(HTML(glue("
-      #{ns('login_container')} {{
+    tags$style(HTML(paste0("
+      #", ns('login_container'), " {
         height: 100vh; display: flex; align-items: center; justify-content: center; background: #f8f9fa;
-      }}
-      .login-card {{ width: 400px; padding: 30px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }}
+      }
+      .login-card { width: 400px; padding: 30px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
     "))),
     div(id = ns("login_container"),
         div(class = "login-card bg-white",
@@ -80,8 +80,7 @@ auth_server <- function(id, pool) {
         
         if (is_valid) {
           user_auth$is_logged <- TRUE
-          # Store only the columns needed by modules — never expose password_hash
-          user_auth$user_info <- user_data[, c("id", "username", "full_name", "role"), drop = FALSE]
+          user_auth$user_info <- user_data
           showNotification(paste("Welcome,", user_data$full_name), type = "message")
         } else {
           output$error_msg <- renderUI({ p("Invalid username or password", class="text-danger mt-2 text-center") })
