@@ -1,5 +1,15 @@
 options(shiny.fullstacktrace = TRUE)
 
+# Reload .Renviron files on every app start so credential changes take effect
+# without needing a full R session restart.
+# Global (~/.Renviron) first; project .Renviron loaded second so it can override.
+local({
+  global_env  <- path.expand("~/.Renviron")
+  project_env <- file.path(getwd(), ".Renviron")
+  if (file.exists(global_env))  readRenviron(global_env)
+  if (file.exists(project_env)) readRenviron(project_env)
+})
+
 library(shiny)
 library(bslib)
 library(pool)
@@ -15,6 +25,7 @@ library(rhandsontable)
 library(shinycssloaders)
 library(pdftools)
 library(googleCloudStorageR)
+library(blastula)
 try(library(sodium),     silent = TRUE)
 try(library(RPostgres),  silent = TRUE)
 try(library(base64enc),  silent = TRUE)
@@ -158,6 +169,19 @@ if (nchar(gcs_bucket) > 0 && requireNamespace("googleCloudStorageR", quietly = T
   message("GCS: googleCloudStorageR package not installed — GCS export disabled.")
 }
 
+# --- C: Email notification (prescription .xlsx as attachment → triggers PAD) ---
+# PAD monitors the inbox for emails with subject "RenalIQ Prescription".
+# Works with any email client (Gmail/Outlook desktop) — no cloud flow needed.
+smtp_from <- Sys.getenv("SMTP_FROM")
+smtp_to   <- Sys.getenv("SMTP_TO")
+smtp_pass <- Sys.getenv("SMTP_PASS")
+email_enabled <- nchar(smtp_from) > 0 && nchar(smtp_to) > 0 && nchar(smtp_pass) > 0
+if (email_enabled) {
+  message("Email: prescription notifications enabled — sending to ", smtp_to)
+} else {
+  message("Email: SMTP_FROM/SMTP_TO/SMTP_PASS not set — email notification disabled.")
+}
+
 # --- Mobile Optimized UI ---
 secure_ui_contents <- function() {
   page_navbar(
@@ -268,6 +292,10 @@ server <- function(input, output, session) {
                                          rx_output_dir     = rx_output_dir,
                                          gcs_enabled       = gcs_enabled,
                                          gcs_bucket        = gcs_bucket,
+                                         email_enabled     = email_enabled,
+                                         smtp_from         = smtp_from,
+                                         smtp_to           = smtp_to,
+                                         smtp_pass         = smtp_pass,
                                          freq_cats         = freq_cats_list,
                                          freq_label_map    = freq_label_map)
     lab_flow_logic   <- lab_flowsheet_server("lab_mod", pool, current_pt, lab_targets_raw,

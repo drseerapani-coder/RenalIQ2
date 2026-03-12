@@ -28,7 +28,7 @@ RUN R -e "install.packages(c('shiny', 'bslib', 'pool', 'DBI', 'RPostgres', \
 # Service-account JSON is NOT baked into the image — inject at runtime via env var:
 #   GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT = <full JSON as a single-line string>
 #   GCS_BUCKET                          = renaliq-prescriptions
-RUN R -e "install.packages(c('writexl', 'googleCloudStorageR'), repos='https://cran.rstudio.com/')"
+RUN R -e "install.packages(c('writexl', 'googleCloudStorageR', 'blastula'), repos='https://cran.rstudio.com/')"
 
 # Note: 'openai' R package removed — AI calls now go through httr directly,
 # supporting both Ollama (local, default) and OpenAI (cloud fallback).
