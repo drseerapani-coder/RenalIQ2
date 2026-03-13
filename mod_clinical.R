@@ -175,13 +175,14 @@ clinical_server <- function(id, pool, current_pt, user_info) {
       }
     })
 
-    # JS helper: clears the date input DOM value directly, bypassing Shiny's
-    # updateDateInput(value=NA) which triggers an rlang::warn() that suppressWarnings()
-    # cannot catch in newer Shiny versions.
+    # JS helper: clears the follow-up date field completely.
+    # Uses querySelector to target the <input> inside the dateInput wrapper div,
+    # then calls Shiny.setInputValue to sync the cleared state to the R session.
     clear_followup <- function() {
       shinyjs::runjs(paste0(
-        "var el = document.getElementById('", ns("v_followup"), "');",
-        "if (el) { el.value = ''; el.dispatchEvent(new Event('change', {bubbles:true})); }"
+        "var inp = document.querySelector('#", ns("v_followup"), " input');",
+        "if (inp) { inp.value = ''; }",
+        "Shiny.setInputValue('", ns("v_followup"), "', null, {priority: 'event'});"
       ))
     }
 
@@ -330,7 +331,14 @@ clinical_server <- function(id, pool, current_pt, user_info) {
       req(current_pt(), user_info())
       curr_user    <- user_info()$username
       pt_id        <- as.integer(current_pt()$id)
-      followup_val <- if (!is.null(followup_override)) as.character(followup_override) else as.character(input$v_followup)
+      # followup_override is set only when the follow-up modal is confirmed.
+      # For Vitals / PMHx saves (no modal), input$v_followup may be NULL — store "" safely.
+      followup_val <- if (!is.null(followup_override)) {
+        as.character(followup_override)
+      } else {
+        v <- input$v_followup
+        if (is.null(v) || length(v) == 0 || is.na(v)) "" else as.character(v)
+      }
 
       payload   <- list(
         vitals        = list(bp = input$v_bp, hr = input$v_hr, weight = input$v_weight, temp = input$v_temp),
@@ -424,23 +432,23 @@ clinical_server <- function(id, pool, current_pt, user_info) {
     }
 
     # --- Save button observers ---
+    # Follow-up date is ONLY required for "Save Notes" and "Save All".
+    # "Save Vitals" and "Save PMHx" never prompt for follow-up.
+
     observeEvent(input$save_vitals_btn, {
-      # Vitals: no followup required
-      proceed_to_save(include_pmhx = FALSE, followup_override = NULL)
+      proceed_to_save(include_pmhx = FALSE, followup_override = NULL)   # no follow-up check
     })
 
     observeEvent(input$save_notes_btn, {
-      # Notes: followup required
-      check_and_save(include_pmhx = FALSE, require_followup = TRUE)
+      check_and_save(include_pmhx = FALSE, require_followup = TRUE)     # follow-up required
     })
 
     observeEvent(input$save_pmhx_btn, {
-      do_save_pmhx()
+      do_save_pmhx()                                                     # no follow-up check
     })
 
     observeEvent(input$save_all_btn, {
-      # Save All: followup required, includes PMHx
-      check_and_save(include_pmhx = TRUE, require_followup = TRUE)
+      check_and_save(include_pmhx = TRUE, require_followup = TRUE)      # follow-up required
     })
 
     # Followup modal confirm
@@ -475,16 +483,18 @@ clinical_server <- function(id, pool, current_pt, user_info) {
     })
 
     observeEvent(input$add_past_medical_history_row, {
-      df <- if (!is.null(input$past_medical_history_table)) hot_to_r(input$past_medical_history_table) else pmh_data()
+      df <- tryCatch(
+        if (!is.null(input$past_medical_history_table)) hot_to_r(input$past_medical_history_table) else pmh_data(),
+        error = function(e) pmh_data()   # fallback if afterChange hook fires simultaneously
+      )
       pmh_data(rbind(df, data.frame(Condition = "", Year = "")))
     })
 
     observeEvent(input$del_past_medical_history_row, {
-      df <- if (!is.null(input$past_medical_history_table)) {
-        hot_to_r(input$past_medical_history_table)
-      } else {
-        pmh_data()
-      }
+      df <- tryCatch(
+        if (!is.null(input$past_medical_history_table)) hot_to_r(input$past_medical_history_table) else pmh_data(),
+        error = function(e) pmh_data()   # fallback if afterChange hook fires simultaneously
+      )
       sel <- input$past_medical_history_table_select
       if (!is.null(sel) && !is.null(sel$r) && nrow(df) > 0) {
         row_to_del <- as.numeric(sel$r) + 1

@@ -150,6 +150,13 @@ registration_server <- function(id, pool, current_pt_out, user_info) {
     }, priority = 20)
     
     observeEvent(list(input$back_to_search, input$close_profile, input$close_profile_top), {
+      # Guard: only reset when a button was actually clicked (value > 0).
+      # Without this, the observer fires when close_profile / close_profile_top
+      # are first rendered (NULL → 0), causing the profile to disappear immediately.
+      clicked <- isTRUE(input$back_to_search   > 0) ||
+                 isTRUE(input$close_profile     > 0) ||
+                 isTRUE(input$close_profile_top > 0)
+      if (!clicked) return()
       pt_state$view_mode <- "search"
     })
     
