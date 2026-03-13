@@ -1,21 +1,7 @@
-1in120,Once in 4 months,Misc
-1in14,Once in 14 days,Misc
-1in21,Once every 3 weeks,Misc
-1in42,Once every 6 weeks,Misc
-1in180,Once in 6 months,Misc
-1in60,Once in 2 months,Misc
-1in90,Once in 3 months,Misc
-5xd,5 times a day,TDS/QID
-6xd,6 times a day,TDS/QID
-alt,Alternate days,Misc
 bd10,10AM - 10PM,BD
 bd8,8AM - 8PM,BD
 diuretic,8AM - 2PM,BD
 bd1422,2PM - 10PM,BD
-flu,Annually,Misc
-friw,Every Friday,Misc
-hepb,0 - 1 - 2 - 6 months,Misc
-monthly,Monthly once,Misc
 mon,Every Monday,Days
 tue,Every Tuesday,Days
 wed,Every Wednesday,Days
@@ -24,6 +10,22 @@ fri,Every Friday,Days
 sat,Every Saturday,Days
 sun,Every Sunday,Days
 mwf,Mon - Wed - Fri,Days
+tts,Tue - Thu - Sat,Days
+1in120,Once in 4 months,Misc
+1in14,Once in 14 days,Misc
+1in21,Once every 3 weeks,Misc
+1in42,Once every 6 weeks,Misc
+1in180,Once in 6 months,Misc
+1in60,Once in 2 months,Misc
+1in90,Once in 3 months,Misc
+alt,Alternate days,Misc
+flu,Annually,Misc
+mth,Every Monday & Thursday,Misc
+tf,Every Tuesday & Friday,Misc
+hepb,0 - 1 - 2 - 6 months,Misc
+monthly,Monthly once,Misc
+rtx,Two doses two weeks apart,Misc
+weekly,Weekly once,Misc
 od10,10AM,OD
 od11,11AM,OD
 od12,12PM,OD
@@ -48,11 +50,9 @@ od6,6AM,OD
 od7,7AM,OD
 od8,8AM,OD
 od9,9AM,OD
-prn,As needed,TDS/QID
-qid,6AM - 12PM - 6PM - 10PM,TDS/QID
-rtx,Two doses two weeks apart,Misc
-stat,Only once,TDS/QID
-tds,8AM - 2PM - 10PM,TDS/QID
-tid,8AM - 2PM - 10PM,TDS/QID
-tts,Tue - Thu - Sat,Days
-weekly,Weekly once,Misc
+5xd,5 times a day,TID/QID
+6xd,6 times a day,TID/QID
+prn,As needed,Misc
+qid,6AM - 12PM - 6PM - 10PM,TID/QID
+stat,Only once,Misc
+tid,8AM - 2PM - 10PM,TID/QID

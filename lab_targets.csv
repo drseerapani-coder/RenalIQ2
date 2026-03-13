@@ -48,6 +48,8 @@ Urine,CUE:Protein,,,,text
 Urine,CUE:Blood,,,,text
 Urine,CUE:RBC,,,,text
 Urine,CUE:WBC,,,,text
+Urine,CUE:Glucose,,,,text
+Urine,CUE:pH,,,,text
 Urine,Urine Creatinine,,,,numeric
 Urine,Urine Albumin,,,,numeric
 Urine,Urine Microalbumin Creatinine Ratio (UMACR),0,30,mg/mmol,numeric

@@ -76,11 +76,13 @@ clinical_ui <- function(id) {
               # ROW 1: COMPACT VITALS + Save Vitals button
               div(class = "vitals-card rounded-3",
                   layout_column_wrap(
-                    width = 1/4, gap = "10px",
-                    textInput(ns("v_bp"), div(icon("heart-pulse"), " BP"), placeholder = "120/80"),
-                    numericInput(ns("v_hr"), div(icon("gauge-high"), " HR"), value = NA),
-                    numericInput(ns("v_weight"), div(icon("weight-scale"), " Wt (kg)"), value = NA),
-                    textInput(ns("v_temp"), div(icon("temperature-half"), " Temp"), placeholder = "98.4")
+                    width = 1/3, gap = "10px",
+                    textInput(ns("v_bp"),     div(icon("heart-pulse"),      " BP"),      placeholder = "120/80"),
+                    numericInput(ns("v_hr"),  div(icon("gauge-high"),       " HR"),      value = NA),
+                    numericInput(ns("v_weight"), div(icon("weight-scale"),  " Wt (kg)"), value = NA),
+                    textInput(ns("v_temp"),   div(icon("temperature-half"), " Temp"),    placeholder = "98.4"),
+                    numericInput(ns("v_sats"), div(icon("lungs"),           " Sats (%)"), value = NA, min = 0, max = 100),
+                    numericInput(ns("v_rr"),  div(icon("wind"),             " RR (/min)"), value = NA, min = 0)
                   ),
                   div(class = "d-flex justify-content-end mt-1",
                       actionButton(ns("save_vitals_btn"), "Save Vitals",
@@ -95,9 +97,10 @@ clinical_ui <- function(id) {
                           tags$label(icon("clock"), " Quick Interval (Skips Sundays)",
                                      style="font-weight: bold; font-size: 0.8rem; color: #6f42c1; display: block;"),
                           radioButtons(ns("quick_interval"), NULL,
-                                       choices = c("10D" = "10", "1W" = "7", "2W" = "14", "3W" = "21",
-                                                   "1M" = "30", "6W" = "42", "3M" = "90", "4M" = "120",
-                                                   "6M" = "180", "1Y" = "365"),
+                                       choices = c("1D"  = "1",   "2D"  = "2",   "3D"  = "3",   "5D"  = "5",
+                                                   "1W"  = "7",   "10D" = "10",  "2W"  = "14",  "3W"  = "21",
+                                                   "1M"  = "30",  "6W"  = "42",  "2M"  = "60",  "3M"  = "90",
+                                                   "4M"  = "120", "6M"  = "180", "9M"  = "270", "12M" = "365"),
                                        inline = TRUE, selected = character(0))
                       ),
                       div(style="min-width: 160px;",
@@ -148,13 +151,18 @@ clinical_ui <- function(id) {
   )
 }
 
-clinical_server <- function(id, pool, current_pt, user_info) {
+clinical_server <- function(id, pool, current_pt, user_info, refresh_trigger = reactive(0)) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     save_count <- reactiveVal(0)
 
     # --- Reactive States ---
     refresh_visits     <- reactiveVal(0)
+
+    # Global refresh button — re-triggers the visits list reload
+    observeEvent(refresh_trigger(), {
+      refresh_visits(refresh_visits() + 1)
+    }, ignoreInit = TRUE)
     is_locked          <- reactiveVal(FALSE)
     pending_save_config <- reactiveVal(NULL)   # carries include_pmhx + followup_override across modal steps
     note_state <- reactiveValues(
@@ -196,6 +204,8 @@ clinical_server <- function(id, pool, current_pt, user_info) {
       updateNumericInput(session, "v_hr",          value = NA)
       updateNumericInput(session, "v_weight",      value = NA)
       updateTextInput(session,    "v_temp",        value = "")
+      updateNumericInput(session, "v_sats",        value = NA)
+      updateNumericInput(session, "v_rr",          value = NA)
       updateTextAreaInput(session, "clinic_notes", value = "")
       clear_followup()
       updateRadioButtons(session, "quick_interval", selected = character(0))
@@ -215,7 +225,8 @@ clinical_server <- function(id, pool, current_pt, user_info) {
       })
 
       if (!is.null(res) && nrow(res) > 0) {
-        colnames(res) <- c("Condition", "Year")
+        colnames(res)  <- c("Condition", "Year")
+        rownames(res)  <- NULL          # ensure sequential 1,2,3... row headers in table
         pmh_data(res)
       } else {
         pmh_data(data.frame(Condition = character(), Year = character(), stringsAsFactors = FALSE))
@@ -228,7 +239,7 @@ clinical_server <- function(id, pool, current_pt, user_info) {
       req(!is.null(state))
       toggle_state <- !state
 
-      for (field in c("v_bp", "v_hr", "v_weight", "v_temp", "v_followup", "clinic_notes", "quick_interval")) {
+      for (field in c("v_bp", "v_hr", "v_weight", "v_temp", "v_sats", "v_rr", "v_followup", "clinic_notes", "quick_interval")) {
         shinyjs::toggleState(field, condition = toggle_state)
       }
       shinyjs::toggle("pmhx_controls", condition = toggle_state)
@@ -285,6 +296,8 @@ clinical_server <- function(id, pool, current_pt, user_info) {
       updateNumericInput(session,  "v_hr",          value = data$vitals$hr     %||% NA)
       updateNumericInput(session,  "v_weight",      value = data$vitals$weight %||% NA)
       updateTextInput(session,     "v_temp",        value = data$vitals$temp   %||% "")
+      updateNumericInput(session,  "v_sats",        value = data$vitals$sats   %||% NA)
+      updateNumericInput(session,  "v_rr",          value = data$vitals$rr     %||% NA)
       updateTextAreaInput(session, "clinic_notes",  value = data$clinic_notes  %||% "")
 
       f_date <- data$followup_date
@@ -310,14 +323,25 @@ clinical_server <- function(id, pool, current_pt, user_info) {
       pt_id     <- as.integer(current_pt()$id)
       tryCatch({
         if (!is.null(input$past_medical_history_table)) {
-          final_pmhx <- hot_to_r(input$past_medical_history_table)
-          final_pmhx <- final_pmhx[nzchar(trimws(as.character(final_pmhx$Condition))), ]
+          final_pmhx <- tryCatch(hot_to_r(input$past_medical_history_table),
+                                 error = function(e) pmh_data())
+          # Filter out blank/NA rows safely: convert to character first so
+          # !is.na() catches NA_character_, preventing nzchar(NA) → NA → index crash.
+          cond_str   <- trimws(as.character(final_pmhx$Condition))
+          keep       <- !is.na(cond_str) & nzchar(cond_str) & tolower(cond_str) != "na"
+          final_pmhx           <- final_pmhx[keep, , drop = FALSE]
+          rownames(final_pmhx) <- NULL
           dbExecute(pool, "DELETE FROM past_medical_history WHERE registration_id = $1", list(pt_id))
           if (nrow(final_pmhx) > 0) {
             for (i in seq_len(nrow(final_pmhx))) {
+              condition_val <- trimws(as.character(final_pmhx$Condition[i]))
+              year_val      <- trimws(as.character(final_pmhx$Year[i]))
+              if (is.na(condition_val) || !nzchar(condition_val) || condition_val == "NA") next
               dbExecute(pool,
                 "INSERT INTO past_medical_history (registration_id, condition_text, onset_date, created_by) VALUES ($1, $2, $3, $4)",
-                list(pt_id, as.character(final_pmhx$Condition[i]), as.character(final_pmhx$Year[i]), curr_user))
+                list(pt_id, condition_val,
+                     if (!is.na(year_val) && nzchar(year_val) && year_val != "NA") year_val else NA,
+                     curr_user))
             }
           }
           pmh_data(final_pmhx)
@@ -327,7 +351,8 @@ clinical_server <- function(id, pool, current_pt, user_info) {
     }
 
     # 6b. Execute visit save (vitals + notes + optional PMHx)
-    do_execute_save <- function(force_new = FALSE, include_pmhx = TRUE, followup_override = NULL) {
+    # include_notes = FALSE: vitals-only save — preserves existing notes/followup in DB
+    do_execute_save <- function(force_new = FALSE, include_pmhx = TRUE, include_notes = TRUE, followup_override = NULL) {
       req(current_pt(), user_info())
       curr_user    <- user_info()$username
       pt_id        <- as.integer(current_pt()$id)
@@ -340,36 +365,62 @@ clinical_server <- function(id, pool, current_pt, user_info) {
         if (is.null(v) || length(v) == 0 || is.na(v)) "" else as.character(v)
       }
 
-      payload   <- list(
-        vitals        = list(bp = input$v_bp, hr = input$v_hr, weight = input$v_weight, temp = input$v_temp),
-        clinic_notes  = input$clinic_notes,
-        followup_date = followup_val
-      )
-      json_data <- jsonlite::toJSON(payload, auto_unbox = TRUE)
+      vitals_val <- list(bp = input$v_bp, hr = input$v_hr, weight = input$v_weight, temp = input$v_temp,
+                         sats = input$v_sats, rr = input$v_rr)
 
       tryCatch({
         poolWithTransaction(pool, function(con) {
           if (is.null(note_state$active_visit_id) || force_new) {
+            # New record — always save all fields
+            payload   <- list(vitals = vitals_val, clinic_notes = input$clinic_notes, followup_date = followup_val)
+            json_data <- jsonlite::toJSON(payload, auto_unbox = TRUE)
             new_id <- DBI::dbGetQuery(con,
               "INSERT INTO visitsmodule (patient_id, visit_date, visit_json, created_by, updated_at)
                VALUES ($1, CURRENT_DATE, $2, $3, NOW()) RETURNING id",
               list(pt_id, as.character(json_data), curr_user))$id
             note_state$active_visit_id <- new_id
           } else {
+            # Updating existing record
+            if (!include_notes) {
+              # Vitals-only: read existing notes/followup and keep them intact
+              existing_row <- DBI::dbGetQuery(con,
+                "SELECT visit_json FROM visitsmodule WHERE id = $1::int",
+                list(as.integer(note_state$active_visit_id)))
+              old <- if (nrow(existing_row) > 0)
+                tryCatch(jsonlite::fromJSON(existing_row$visit_json[1]), error = function(e) list())
+              else list()
+              payload <- list(
+                vitals        = vitals_val,
+                clinic_notes  = old$clinic_notes  %||% "",
+                followup_date = old$followup_date %||% followup_val
+              )
+            } else {
+              payload <- list(vitals = vitals_val, clinic_notes = input$clinic_notes, followup_date = followup_val)
+            }
+            json_data <- jsonlite::toJSON(payload, auto_unbox = TRUE)
             DBI::dbExecute(con,
               "UPDATE visitsmodule SET visit_json = $1, updated_by = $2, updated_at = NOW()
                WHERE id = $3::int",
               list(as.character(json_data), curr_user, as.integer(note_state$active_visit_id)))
           }
           if (include_pmhx && !is.null(input$past_medical_history_table)) {
-            final_pmhx <- hot_to_r(input$past_medical_history_table)
-            final_pmhx <- final_pmhx[nzchar(trimws(as.character(final_pmhx$Condition))), ]
+            final_pmhx <- tryCatch(hot_to_r(input$past_medical_history_table),
+                                   error = function(e) pmh_data())
+            cond_str             <- trimws(as.character(final_pmhx$Condition))
+            keep_rows            <- !is.na(cond_str) & nzchar(cond_str) & tolower(cond_str) != "na"
+            final_pmhx           <- final_pmhx[keep_rows, , drop = FALSE]
+            rownames(final_pmhx) <- NULL
             DBI::dbExecute(con, "DELETE FROM past_medical_history WHERE registration_id = $1", list(pt_id))
             if (nrow(final_pmhx) > 0) {
               for (i in seq_len(nrow(final_pmhx))) {
+                condition_val <- trimws(as.character(final_pmhx$Condition[i]))
+                year_val      <- trimws(as.character(final_pmhx$Year[i]))
+                if (is.na(condition_val) || !nzchar(condition_val) || condition_val == "NA") next
                 DBI::dbExecute(con,
                   "INSERT INTO past_medical_history (registration_id, condition_text, onset_date, created_by) VALUES ($1, $2, $3, $4)",
-                  list(pt_id, as.character(final_pmhx$Condition[i]), as.character(final_pmhx$Year[i]), curr_user))
+                  list(pt_id, condition_val,
+                       if (!is.na(year_val) && nzchar(year_val) && year_val != "NA") year_val else NA,
+                       curr_user))
               }
             }
             pmh_data(final_pmhx)
@@ -389,12 +440,13 @@ clinical_server <- function(id, pool, current_pt, user_info) {
     }
 
     # 6c. Check for duplicate date, then execute (or show overwrite modal)
-    proceed_to_save <- function(include_pmhx, followup_override = NULL) {
+    proceed_to_save <- function(include_pmhx, followup_override = NULL, include_notes = TRUE) {
       pt_id    <- as.integer(current_pt()$id)
       existing <- dbGetQuery(pool,
         "SELECT id FROM visitsmodule WHERE patient_id = $1 AND visit_date = CURRENT_DATE", list(pt_id))
       if (is.null(note_state$active_visit_id) && nrow(existing) > 0) {
-        pending_save_config(list(include_pmhx = include_pmhx, followup_override = followup_override))
+        pending_save_config(list(include_pmhx = include_pmhx, followup_override = followup_override,
+                                 include_notes = include_notes))
         showModal(modalDialog(
           title = "Existing Record Found",
           "A record already exists for today. Overwrite it or create a new entry?",
@@ -405,7 +457,8 @@ clinical_server <- function(id, pool, current_pt, user_info) {
           )
         ))
       } else {
-        do_execute_save(force_new = FALSE, include_pmhx = include_pmhx, followup_override = followup_override)
+        do_execute_save(force_new = FALSE, include_pmhx = include_pmhx, include_notes = include_notes,
+                        followup_override = followup_override)
       }
     }
 
@@ -422,13 +475,14 @@ clinical_server <- function(id, pool, current_pt, user_info) {
       )
     }
 
-    check_and_save <- function(include_pmhx, require_followup = TRUE) {
+    check_and_save <- function(include_pmhx, require_followup = TRUE, include_notes = TRUE) {
       if (require_followup && !shiny::isTruthy(input$v_followup)) {
-        pending_save_config(list(include_pmhx = include_pmhx, followup_override = NULL))
+        pending_save_config(list(include_pmhx = include_pmhx, followup_override = NULL,
+                                 include_notes = include_notes))
         showModal(followup_modal_ui())
         return()
       }
-      proceed_to_save(include_pmhx = include_pmhx, followup_override = NULL)
+      proceed_to_save(include_pmhx = include_pmhx, followup_override = NULL, include_notes = include_notes)
     }
 
     # --- Save button observers ---
@@ -436,7 +490,8 @@ clinical_server <- function(id, pool, current_pt, user_info) {
     # "Save Vitals" and "Save PMHx" never prompt for follow-up.
 
     observeEvent(input$save_vitals_btn, {
-      proceed_to_save(include_pmhx = FALSE, followup_override = NULL)   # no follow-up check
+      # include_notes = FALSE: preserves existing notes/followup in DB, only updates vitals
+      proceed_to_save(include_pmhx = FALSE, include_notes = FALSE, followup_override = NULL)
     })
 
     observeEvent(input$save_notes_btn, {
@@ -457,19 +512,31 @@ clinical_server <- function(id, pool, current_pt, user_info) {
       req(cfg)
       followup_override <- as.character(input$modal_followup_date)
       removeModal()
-      proceed_to_save(include_pmhx = cfg$include_pmhx, followup_override = followup_override)
+      proceed_to_save(include_pmhx = cfg$include_pmhx, followup_override = followup_override,
+                      include_notes = cfg$include_notes %||% TRUE)
       pending_save_config(NULL)
     })
 
     # Duplicate-date modal confirm
     observeEvent(input$save_overwrite, {
       cfg <- pending_save_config()
-      do_execute_save(force_new = FALSE, include_pmhx = cfg$include_pmhx %||% TRUE, followup_override = cfg$followup_override)
+      # note_state$active_visit_id is NULL (that's why the modal was shown).
+      # Fetch today's visit ID so do_execute_save takes the UPDATE branch, not INSERT.
+      pt_id    <- as.integer(current_pt()$id)
+      existing <- dbGetQuery(pool,
+        "SELECT id FROM visitsmodule WHERE patient_id = $1 AND visit_date = CURRENT_DATE",
+        list(pt_id))
+      if (nrow(existing) > 0) note_state$active_visit_id <- existing$id[1]
+      do_execute_save(force_new = FALSE, include_pmhx = cfg$include_pmhx %||% TRUE,
+                      include_notes = cfg$include_notes %||% TRUE,
+                      followup_override = cfg$followup_override)
       pending_save_config(NULL)
     })
     observeEvent(input$save_as_new, {
       cfg <- pending_save_config()
-      do_execute_save(force_new = TRUE, include_pmhx = cfg$include_pmhx %||% TRUE, followup_override = cfg$followup_override)
+      do_execute_save(force_new = TRUE, include_pmhx = cfg$include_pmhx %||% TRUE,
+                      include_notes = cfg$include_notes %||% TRUE,
+                      followup_override = cfg$followup_override)
       pending_save_config(NULL)
     })
 
@@ -487,7 +554,9 @@ clinical_server <- function(id, pool, current_pt, user_info) {
         if (!is.null(input$past_medical_history_table)) hot_to_r(input$past_medical_history_table) else pmh_data(),
         error = function(e) pmh_data()   # fallback if afterChange hook fires simultaneously
       )
-      pmh_data(rbind(df, data.frame(Condition = "", Year = "")))
+      new_df           <- rbind(df, data.frame(Condition = "", Year = "", stringsAsFactors = FALSE))
+      rownames(new_df) <- NULL   # prevent duplicate "1" row labels from rbind
+      pmh_data(new_df)
     })
 
     observeEvent(input$del_past_medical_history_row, {
@@ -499,11 +568,15 @@ clinical_server <- function(id, pool, current_pt, user_info) {
       if (!is.null(sel) && !is.null(sel$r) && nrow(df) > 0) {
         row_to_del <- as.numeric(sel$r) + 1
         if (row_to_del <= nrow(df)) {
-          pmh_data(df[-row_to_del, ])
+          new_df           <- df[-row_to_del, , drop = FALSE]
+          rownames(new_df) <- NULL
+          pmh_data(new_df)
           showNotification("Row removed.", type = "message")
         }
       } else if (nrow(df) > 0) {
-        pmh_data(df[-nrow(df), ])
+        new_df           <- df[-nrow(df), , drop = FALSE]
+        rownames(new_df) <- NULL
+        pmh_data(new_df)
         showNotification("Removed last row.", type = "warning")
       }
     })

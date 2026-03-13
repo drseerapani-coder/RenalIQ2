@@ -230,9 +230,29 @@ secure_ui_contents <- function() {
       ")),
       uiOutput("global_pt_header")
     ),
-    
+
+    # Global refresh button — pulls latest data from DB for all modules.
+    # Placed before nav_spacer so it sits left-aligned next to the title.
+    nav_item(
+      tags$style(HTML("
+        #refresh_all_btn { color: #26A69A; padding: 6px 10px; }
+        #refresh_all_btn:hover { color: #1a756d; }
+        #refresh_all_btn.refreshing .fa-rotate-right {
+          animation: spin-icon 0.8s linear infinite;
+        }
+        @keyframes spin-icon {
+          from { transform: rotate(0deg); }
+          to   { transform: rotate(360deg); }
+        }
+      ")),
+      actionButton("refresh_all_btn", NULL,
+                   icon  = icon("rotate-right"),
+                   class = "btn btn-link",
+                   title = "Refresh — pull latest data from server")
+    ),
+
     nav_spacer(),
-    
+
     nav_panel("Demographics", registration_ui("reg_mod")),
     nav_panel("Notes", clinical_ui("clin_mod")),
     nav_panel("Prescriptions", mobile_rx_ui("rx_mod")),
@@ -287,7 +307,8 @@ server <- function(input, output, session) {
     req(auth$is_logged())
 
     reg_logic        <- registration_server("reg_mod", pool, current_pt, auth$user_info)
-    clin_logic       <- clinical_server("clin_mod", pool, current_pt, auth$user_info)
+    clin_logic       <- clinical_server("clin_mod", pool, current_pt, auth$user_info,
+                                        refresh_trigger = refresh_val)
     rx_logic         <- mobile_rx_server("rx_mod", pool, current_pt, auth$user_info,
                                          rx_output_dir     = rx_output_dir,
                                          gcs_enabled       = gcs_enabled,
@@ -302,6 +323,32 @@ server <- function(input, output, session) {
                                              reactive(input$main_nav), auth$user_info)
     lab_ingest_logic <- lab_ingestion_server("lab_ingest_mod", pool, current_pt,
                                              auth$user_info, lab_targets_raw)
+
+    # ── Global Refresh Button ──────────────────────────────────────────────────
+    # Re-fetches the current patient from the DB (picks up any changes made by
+    # other users), then increments refresh_val so all modules reload their data.
+    observeEvent(input$refresh_all_btn, {
+      shinyjs::addClass("refresh_all_btn", "refreshing")
+
+      pt <- isolate(current_pt())
+      if (!is.null(pt) && !is.null(pt$id)) {
+        tryCatch({
+          updated <- pool::dbGetQuery(pool,
+            "SELECT * FROM registrations WHERE id = $1", list(as.integer(pt$id)))
+          if (nrow(updated) > 0) {
+            updated_list <- setNames(
+              lapply(as.list(updated[1, , drop = FALSE]), function(x) x[[1]]),
+              names(updated))
+            current_pt(updated_list)   # triggers all modules watching current_pt()
+          }
+        }, error = function(e) NULL)
+      }
+
+      refresh_val(refresh_val() + 1)   # triggers clinical visits + timeline
+
+      shinyjs::delay(600, shinyjs::removeClass("refresh_all_btn", "refreshing"))
+      showNotification("Data refreshed", type = "message", duration = 2)
+    })
 
     # Refresh timeline whenever any module successfully saves data.
     # Pass refresh_val directly (not wrapped in reactive()) — creating reactive()

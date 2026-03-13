@@ -59,8 +59,9 @@ mobile_rx_server <- function(id, pool, current_pt, user_info,
 
     # --- State ---
     rx_master    <- reactiveVal(data.frame())
-    save_trigger <- reactiveVal(0)
-    edit_drug_rv <- reactiveVal(NULL)   # holds the drug row currently being edited
+    save_trigger    <- reactiveVal(0)
+    rx_list_trigger <- reactiveVal(0)   # incremented to force rx_list re-render without reading rx_meds$df reactively
+    edit_drug_rv    <- reactiveVal(NULL) # holds the drug row currently being edited
     rx_meds <- reactiveValues(
       df = data.frame(brand_name=character(), generic=character(), dose=character(),
                       freq=character(), route=character(), duration=character(),
@@ -616,8 +617,12 @@ mobile_rx_server <- function(id, pool, current_pt, user_info,
     })
 
     observeEvent(input$del_rx_idx, {
-      rx_meds$df <- rx_meds$df[-input$del_rx_idx, ]
+      idx <- as.integer(input$del_rx_idx)
+      if (is.na(idx) || idx < 1 || idx > nrow(rx_meds$df)) return()
+      rx_meds$df           <- rx_meds$df[-idx, , drop = FALSE]
+      rownames(rx_meds$df) <- NULL
       rx_meds$selected_idx <- NULL
+      rx_list_trigger(rx_list_trigger() + 1)
     })
 
     # --- Rendering ---
@@ -684,10 +689,12 @@ mobile_rx_server <- function(id, pool, current_pt, user_info,
     })
 
     output$rx_list <- renderUI({
-      df <- rx_meds$df
+      rx_list_trigger()                  # structural trigger (load, add, delete, done)
+      sel_idx <- rx_meds$selected_idx   # re-render when selection changes
+      df      <- isolate(rx_meds$df)    # NOT a reactive dep — avoids re-render on every keystroke
       if (nrow(df) == 0) return(NULL)
       lapply(1:nrow(df), function(i) {
-        sel <- !is.null(rx_meds$selected_idx) && rx_meds$selected_idx == i
+        sel <- !is.null(sel_idx) && sel_idx == i
         tagList(
           div(class   = paste("rx-card p-3", if (sel) "selected"),
               onclick = sprintf("Shiny.setInputValue('%s', %d, {priority: 'event'})", ns("select_rx_card"), i),
@@ -700,9 +707,12 @@ mobile_rx_server <- function(id, pool, current_pt, user_info,
                         span(class = "rx-badge", icon("clock"),          df$freq[i]),
                         span(class = "rx-badge", icon("map-marker-alt"), df$route[i]))
                   ),
-                  actionButton(ns(paste0("del_", i)), NULL, icon("trash"),
-                               class   = "btn btn-sm btn-outline-danger border-0",
-                               onclick = sprintf("event.stopPropagation(); Shiny.setInputValue('%s', %d)", ns("del_rx_idx"), i))
+                  tags$button(
+                    class   = "btn btn-sm btn-outline-danger border-0",
+                    type    = "button",
+                    onclick = sprintf("event.stopPropagation(); Shiny.setInputValue('%s', %d, {priority:'event'})", ns("del_rx_idx"), i),
+                    icon("trash")
+                  )
               )
           ),
           if (sel) uiOutput(ns("quick_edit_panel"))
@@ -757,10 +767,40 @@ mobile_rx_server <- function(id, pool, current_pt, user_info,
     observeEvent(input$save_edit_update, {
       req(edit_drug_rv(), input$edit_brand)
       d         <- edit_drug_rv()
+      brand_v   <- trimws(input$edit_brand)
+      gen_v     <- trimws(input$edit_generic)
+      dose_v    <- trimws(input$edit_dose)
+      freq_v    <- trimws(input$edit_freq)
       route_val <- if (nchar(trimws(input$edit_route)) > 0)
                      trimws(input$edit_route)
                    else
-                     infer_route(input$edit_brand)
+                     infer_route(brand_v)
+      dur_v     <- trimws(input$edit_dur)
+
+      # Pre-flight: check if another drug (different id) already has these key values.
+      # The DB unique constraint covers (brand_name, generic, dose, freq, route) —
+      # updating to values that belong to a different row would violate it.
+      conflict <- tryCatch(
+        dbGetQuery(pool,
+          "SELECT id FROM drug_master
+            WHERE lower(trim(brand_name)) = lower(trim($1))
+              AND lower(trim(generic))    = lower(trim($2))
+              AND lower(trim(dose))       = lower(trim($3))
+              AND lower(trim(freq))       = lower(trim($4))
+              AND lower(trim(route))      = lower(trim($5))
+              AND id::text != $6",
+          list(brand_v, gen_v, dose_v, freq_v, route_val, as.character(d$id))),
+        error = function(e) NULL)
+
+      if (!is.null(conflict) && nrow(conflict) > 0) {
+        showNotification(
+          paste0("Another drug with those exact details already exists in the master list. ",
+                 "Delete or edit the duplicate entry first, or use 'Add as New Drug' if ",
+                 "you intended a different formulation."),
+          type = "error", duration = 8)
+        return()
+      }
+
       tryCatch({
         dbExecute(pool,
           "UPDATE drug_master
@@ -771,9 +811,7 @@ mobile_rx_server <- function(id, pool, current_pt, user_info,
                   route      = $5,
                   duration   = $6
             WHERE id::text   = $7",
-          list(trimws(input$edit_brand), trimws(input$edit_generic),
-               trimws(input$edit_dose),  trimws(input$edit_freq),
-               route_val,                trimws(input$edit_dur),
+          list(brand_v, gen_v, dose_v, freq_v, route_val, dur_v,
                as.character(d$id)))
         load_rx_master()
         edit_drug_rv(NULL)
@@ -861,9 +899,11 @@ mobile_rx_server <- function(id, pool, current_pt, user_info,
         )
         # normalize_rx_cols: maps legacy column names, adds missing cols, drops extras
         rx_meds$df <- clean_df(normalize_rx_cols(loaded))
+        rx_list_trigger(rx_list_trigger() + 1)
       } else {
         rx_meta$is_history <- FALSE
         rx_meds$df <- rx_meds$df[0, ]
+        rx_list_trigger(rx_list_trigger() + 1)
       }
     })
 

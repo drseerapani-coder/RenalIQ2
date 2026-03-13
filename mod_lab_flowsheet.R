@@ -92,7 +92,7 @@ lab_flowsheet_server <- function(id, pool, current_pt, lab_targets_raw,
         SELECT test_name, test_date, num_val, value_text
         FROM   labs
         WHERE  patient_id::text = $1
-        ORDER  BY test_date DESC",
+        ORDER  BY test_date ASC",
         list(as.character(current_pt()$id)))
 
       df_base <- data.frame(test_name = lab_targets_raw$test_name,
@@ -246,7 +246,7 @@ lab_flowsheet_server <- function(id, pool, current_pt, lab_targets_raw,
       }
 
       date_res <- dbGetQuery(pool,
-        "SELECT DISTINCT test_date FROM labs WHERE patient_id::text = $1 ORDER BY test_date DESC",
+        "SELECT DISTINCT test_date FROM labs WHERE patient_id::text = $1 ORDER BY test_date ASC",
         list(as.character(current_pt()$id)))
 
       if (nrow(date_res) < col_idx) {
