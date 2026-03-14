@@ -124,7 +124,8 @@ clinical_ui <- function(id) {
                     textAreaInput(ns("clinic_notes"), NULL,
                                   rows = 14, width = "100%",
                                   placeholder = "Findings, assessment, plan..."),
-                    div(class = "d-flex justify-content-end mt-1",
+                    div(class = "d-flex justify-content-between align-items-center mt-1",
+                        checklists_ui(ns("checklists")),
                         actionButton(ns("save_notes_btn"), "Save Notes",
                                      class = "btn-sm btn-outline-primary", icon = icon("floppy-disk"))
                     )
@@ -172,6 +173,18 @@ clinical_server <- function(id, pool, current_pt, user_info, refresh_trigger = r
 
     # PMH is global to the patient - loaded once per patient selection
     pmh_data <- reactiveVal(data.frame(Condition = character(), Year = character(), stringsAsFactors = FALSE))
+
+    # --- Specialist Checklists sub-module ---
+    cl_mod <- checklists_server("checklists", pool, current_pt, user_info, is_locked = is_locked)
+
+    # Append checklist text to clinic notes when transferred
+    observeEvent(cl_mod$notes_to_transfer(), {
+      txt <- cl_mod$notes_to_transfer()
+      req(nzchar(trimws(txt)))
+      existing <- isolate(input$clinic_notes)
+      separator <- if (nzchar(trimws(existing))) "\n\n" else ""
+      updateTextAreaInput(session, "clinic_notes", value = paste0(existing, separator, txt))
+    }, ignoreInit = TRUE, ignoreNULL = TRUE)
 
     # "Save All" in header — only visible when unlocked
     output$save_all_ui <- renderUI({

@@ -37,6 +37,7 @@ source("helpers.R")
 source("auth_module.R") 
 source("mod_registration.R")
 source("mod_clinical.R")
+source("mod_checklists.R")
 source("mod_mobile_rx.R")
 source("mod_lab_ingestion.R")
 source("mod_lab_flowsheet.R")
@@ -93,11 +94,29 @@ pool <- tryCatch({
   return(NULL) 
 })
 
-onStop(function() { 
+onStop(function() {
   if (!is.null(pool) && inherits(pool, "Pool")) {
-    poolClose(pool) 
+    poolClose(pool)
   }
 })
+
+# Create specialist_checklists table if it doesn't exist
+if (!is.null(pool) && inherits(pool, "Pool")) {
+  tryCatch({
+    pool::dbExecute(pool,
+      "CREATE TABLE IF NOT EXISTS specialist_checklists (
+        id             SERIAL PRIMARY KEY,
+        patient_id     INTEGER NOT NULL,
+        checklist_type VARCHAR(100),
+        checklist_data JSONB,
+        created_by     VARCHAR(100),
+        created_at     TIMESTAMPTZ DEFAULT NOW()
+      )")
+    message("specialist_checklists table ready.")
+  }, error = function(e) {
+    message("specialist_checklists table creation skipped: ", e$message)
+  })
+}
 
 # 2. FAIL-SAFE OPENAI KEY
 openai_key <- Sys.getenv("OPENAI_API_KEY")
